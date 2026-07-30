@@ -35,7 +35,12 @@ public readonly record struct RectD(double X, double Y, double Width, double Hei
     public bool Contains(Vec2 point) =>
         point.X >= X && point.X <= Right && point.Y >= Y && point.Y <= Bottom;
 
+    public bool Intersects(RectD other) =>
+        Right > other.X && X < other.Right && Bottom > other.Y && Y < other.Bottom;
+
     public RectD Inflate(double horizontal, double vertical) =>
         new(X - horizontal, Y - vertical, Width + (horizontal * 2), Height + (vertical * 2));
-}
 
+    public RectD Translate(Vec2 delta) =>
+        new(X + delta.X, Y + delta.Y, Width, Height);
+}

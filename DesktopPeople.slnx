@@ -2,8 +2,10 @@
   <Folder Name="/src/">
     <Project Path="src/DesktopPeople.App/DesktopPeople.App.csproj" />
     <Project Path="src/DesktopPeople.Core/DesktopPeople.Core.csproj" />
+    <Project Path="src/DesktopPeople.Windows/DesktopPeople.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DesktopPeople.Tests/DesktopPeople.Tests.csproj" />
+    <Project Path="tests/DesktopPeople.WindowHost/DesktopPeople.WindowHost.csproj" />
   </Folder>
 </Solution>

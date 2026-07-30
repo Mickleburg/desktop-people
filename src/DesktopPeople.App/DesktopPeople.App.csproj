@@ -12,5 +12,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\DesktopPeople.Core\DesktopPeople.Core.csproj" />
+    <ProjectReference Include="..\DesktopPeople.Windows\DesktopPeople.Windows.csproj" />
   </ItemGroup>
 </Project>

@@ -1,4 +1,6 @@
 using DesktopPeople.Core;
+using DesktopPeople.Core.Platforms;
+using DesktopPeople.Windows;
 
 namespace DesktopPeople.App;
 
@@ -8,6 +10,7 @@ internal sealed class DesktopPeopleContext : ApplicationContext
     private readonly JsonLineLogger _logger;
     private readonly LauncherForm _launcher;
     private readonly OverlayForm _overlay;
+    private readonly WindowsWindowPlatformProvider _windowPlatforms;
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _visibilityItem;
     private readonly ToolStripMenuItem _pauseItem;
@@ -20,9 +23,30 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         _logger = logger;
         _settings = settingsStore.Load();
         _launcher = new LauncherForm();
-        _overlay = new OverlayForm(logger, _settings.TargetFps)
+        var registry = new PlatformRegistry();
+        _windowPlatforms = new WindowsWindowPlatformProvider(
+            new Win32WindowApi(),
+            new Win32WindowEventSource(),
+            registry,
+            Environment.ProcessId);
+        _windowPlatforms.MetricsUpdated += metrics =>
+        {
+            if (metrics.WasReconciliation)
+            {
+                _logger.Write("platform_snapshot_updated", new
+                {
+                    enumerated_windows = metrics.EnumeratedWindowCount,
+                    platforms = metrics.PlatformCount,
+                    reconciliation_interval_ms = metrics.ReconciliationInterval.TotalMilliseconds,
+                    update_duration_ms = metrics.UpdateDuration.TotalMilliseconds,
+                    average_update_duration_ms = metrics.AverageUpdateDuration.TotalMilliseconds,
+                });
+            }
+        };
+        _overlay = new OverlayForm(logger, _settings.TargetFps, _windowPlatforms)
         {
             IsPaused = _settings.IsPaused,
+            ShowPlatformDebug = _settings.ShowPlatformDebug,
         };
         _launcher.ReleaseRequested += (_, _) =>
         {
@@ -47,6 +71,19 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         };
         _pauseItem.Click += (_, _) => TogglePause();
         menu.Items.Add(_pauseItem);
+#if DEBUG
+        var debugItem = new ToolStripMenuItem("Developer: платформы")
+        {
+            Checked = _settings.ShowPlatformDebug,
+            CheckOnClick = true,
+        };
+        debugItem.Click += (_, _) =>
+        {
+            _overlay.ShowPlatformDebug = debugItem.Checked;
+            SaveSettings(_settings with { ShowPlatformDebug = debugItem.Checked });
+        };
+        menu.Items.Add(debugItem);
+#endif
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Завершить", null, (_, _) => ExitApplication());
 
@@ -64,6 +101,12 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         {
             _overlay.ShowOverlay();
         }
+
+        _windowPlatforms.SetExplicitlyExcludedHandles(
+        [
+            _launcher.Handle.ToInt64(),
+            _overlay.IsHandleCreated ? _overlay.Handle.ToInt64() : 0,
+        ]);
     }
 
     protected override void Dispose(bool disposing)
@@ -72,6 +115,7 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         {
             _tray.Visible = false;
             _tray.Dispose();
+            _windowPlatforms.Dispose();
             _overlay.Dispose();
             _launcher.Dispose();
         }
@@ -141,4 +185,3 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         ExitThread();
     }
 }
-

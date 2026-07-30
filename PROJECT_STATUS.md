@@ -2,62 +2,71 @@
 
 Дата обновления: 2026-07-30
 
-## Исходное состояние
+Этапы 0–1 завершены и вручную проверены пользователем. Этап 2 реализован; перед
+переходом к этапу 3 требуется ручная приёмка окон-платформ на целевом desktop.
 
-Репозиторий был пустым и не был инициализирован как Git-репозиторий. В системе
-были доступны PowerShell и Node.js, но отсутствовали Godot, .NET SDK, C/C++
-compiler и build tools.
+## Реализовано
 
-Для воспроизводимой разработки загружен официальный portable .NET 10.0.302 SDK
-в игнорируемую папку `.tools/dotnet`.
+- изолированный Windows adapter с DWM bounds и fallback;
+- первоначальный scan и reconciliation раз в пять секунд;
+- системные события через thread-safe очередь;
+- фильтрация собственных, невидимых, свёрнутых, малых и служебных окон;
+- screen-to-overlay mapping для отрицательных координат и Per-Monitor DPI;
+- immutable platform snapshots и консервативные видимые сегменты;
+- swept collision по ширине стоп и выбор ближайшей поверхности;
+- attachment, move, resize, close, hide, minimize и restore;
+- падение на нижнее окно или desktop work area;
+- выключенная по умолчанию debug-визуализация;
+- внутренний WindowHost и структурированные platform metrics.
 
-## Текущая итерация
+## Автоматически проверено
 
-Этап 0 реализован. Этап 1 реализован как технический прототип и должен пройти
-ручную визуальную приёмку:
+- baseline этапа 1: 7/7;
+- полный набор этапа 2: 38/38;
+- strict Debug build: 0 warnings, 0 errors;
+- fake API: DWM/fallback, invalid handles и фильтрация;
+- collision, tunnelling, nearest platform, attachment и resize;
+- create/move/minimize/restore/hide/destroy и missed-event reconciliation;
+- реальный WindowHost обнаружен platform provider; первоначальный scan нашёл
+  283 top-level окна, после фильтрации осталось 3 платформы, обновление ~28 мс;
+- исчезновение реальной опоры дало `Idle → Fall` и последующее приземление.
+- self-contained smoke: процесс жив после 6 секунд, без unhandled errors;
+- измеренный idle interval: около 0,73% общего CPU и 71,4 МБ working set;
+- `dotnet format --verify-no-changes`: успешно.
 
-- [x] минимальное Windows-приложение без консоли;
-- [x] компактное стартовое окно;
-- [x] прозрачный topmost overlay;
-- [x] click-through вне hitbox персонажа;
-- [x] временный векторный персонаж;
-- [x] `SPAWN`, `IDLE`, `WALK`, `FALL`, `HELD_BY_MOUSE`;
-- [x] клик, перетаскивание, бросок и гравитация;
-- [x] нижняя граница рабочей области как пол;
-- [x] системный трей, пауза, скрытие и завершение;
-- [x] локальные JSONL-логи без пользовательского контента;
-- [x] настройки в `%LOCALAPPDATA%`;
-- [x] строгая сборка, CI, unit runner и self-contained publish;
-- [x] smoke-запуск self-contained executable и проверка runtime-логов;
-- [ ] ручная проверка selective click-through на целевой системе;
-- [ ] installer (этап 9);
-- [ ] Windows platforms (этап 2);
-- [ ] обработка фотографий (этап 4+).
+## Release artifact
+
+- путь: `artifacts/win-x64/DesktopPeople.exe`;
+- размер: 116 174 631 байт;
+- SHA-256: `55EEFA597E3E0E3D04CBE400463344C6C2C7877C0721D47C71D94260E817AF4F`.
+
+## Вручную проверено
+
+- этап 1: ходьба, grab/drag/release, gravity и selective click-through.
+
+## Пока не проверено вручную
+
+- полный сценарий Блокнота: attachment при move/resize/minimize/close;
+- падение с верхнего окна на нижнее;
+- DPI 100%, 125% и 150%;
+- несколько мониторов с разным DPI;
+- десятиминутный stability/CPU test.
 
 ## Известные ограничения
 
-1. Это не Avatar Builder: фотографии пока не принимаются и не обрабатываются.
-2. Временный renderer рисует векторного человечка без skeletal rig.
-3. `TransparencyKey` подходит для проверки поведения overlay, но может давать
-   цветную кайму на сглаженных краях. Для фото нужен per-pixel alpha renderer.
-4. Физическая опора пока только рабочая область монитора; окна будут добавлены
-   после подтверждения базового runtime.
-5. Иконка tray временно системная.
-6. Installer ещё не подготовлен; self-contained executable уже не требует
-   установленного .NET Runtime.
+1. Перекрытие основано на прямоугольниках и последнем известном z-order; shaped
+   и сложные layered regions не вычисляются полностью.
+2. Несколько мониторов представлены корректным virtual screen, но реальная
+   mixed-DPI конфигурация ещё не проверена вручную.
+3. WinEvent updates могут отставать на один UI tick; reconciliation исправляет
+   пропущенные события раз в пять секунд.
+4. Renderer всё ещё использует временного векторного персонажа и
+   `TransparencyKey`.
+5. Avatar Builder, несколько персонажей и installer не относятся к этапу 2 и не
+   реализованы.
 
-## Следующий проверяемый результат
+## Следующий рекомендуемый шаг
 
-После ручного подтверждения этапа 1: Win32 Windows Adapter с фильтрацией окон,
-DWM-границами, событийным обновлением и посадкой персонажа на верхнюю границу
-Блокнота.
-
-## Результаты проверки итерации
-
-- Debug build: успешно, 0 предупреждений, 0 ошибок.
-- Unit runner: 7/7 проверок успешно.
-- `dotnet format --verify-no-changes`: успешно.
-- Self-contained publish: `artifacts/win-x64/DesktopPeople.exe`, 116 112 675 байт.
-- SHA-256: `8A60855FEC706325C9A4FDA41448F484284BDC2805C29BE4766DC6FF0D864B83`.
-- Smoke test: процесс оставался жив 6 секунд; в логе подтверждены overlay,
-  один монитор и переходы `Spawn → Fall → Idle → Walk`.
+Выполнить сценарии D1–D6 из `docs/MANUAL_ACCEPTANCE.md`. Только после успешной
+ручной приёмки зафиксировать этап 2 полностью завершённым и переходить к системе
+анимаций/поведения этапа 3.

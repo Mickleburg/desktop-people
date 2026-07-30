@@ -1,50 +1,20 @@
 # Архитектура
 
-## Границы компонентов
+Приложение разделено на UI, Windows adapter и независимое физическое ядро.
 
-```text
-DesktopPeople.App (Windows UI/runtime)
-├── LauncherForm          компактное стартовое окно
-├── DesktopPeopleContext  жизненный цикл и системный трей
-├── OverlayForm           кадр, ввод, прозрачное окно
-├── CharacterRenderer     временный векторный renderer
-└── NativeWindowStyles    изолированный Win32 adapter
-             │
-             ▼
-DesktopPeople.Core
-├── CharacterStateMachine независимый конечный автомат
-├── CharacterPhysics      независимая физика персонажа
-├── SettingsStore         локальные настройки
-└── AvatarManifest        версионируемый формат персонажа
-```
+## Компоненты
 
-Будущий `AvatarBuilder.Worker` является отдельным процессом и не будет входить в
-runtime. Обмен планируется через версионированные JSON-сообщения и файлы внутри
-контролируемой временной директории.
+- DesktopPeople.App: стартовое окно, tray, overlay и renderer.
+- DesktopPeople.Windows: чтение окон, события и provider.
+- DesktopPeople.Core: state machine, physics, filter, collision и attachment.
 
-## Поток desktop-runtime
+Только Windows-проект знает о системных handles. Core получает immutable
+PlatformSnapshot; его тесты не требуют настоящих окон.
 
-WinForms `Timer` задаёт кадр с целевой частотой 60 FPS. `OverlayForm` получает
-текущее состояние мыши, обновляет независимую физику и перерисовывает персонажа.
-Когда курсор находится вне hitbox, Windows extended style
-`WS_EX_TRANSPARENT` включается. Внутри hitbox он снимается, поэтому персонажа
-можно кликнуть и перетащить, не активируя overlay.
+## Runtime
 
-Overlay охватывает виртуальный экран, а физический пол берётся из `WorkingArea`
-активного монитора. Тем самым панель задач не используется как зона падения, и
-заложена база для нескольких мониторов.
+Overlay получает snapshot, следует за attachment, интегрирует физику и выполняет
+swept collision. Пустая область сохраняет selective click-through. Screen-origin
+вычитается из координат окон, включая мониторы с отрицательными координатами.
 
-## Данные и приватность
-
-Настройки и структурированные логи хранятся в
-`%LOCALAPPDATA%\DesktopPeople`. Абсолютные пользовательские пути не вшиты в код.
-Сетевых вызовов и телеметрии нет. Формат аватара проверяет UUID, версию,
-ограничения размера и запрещает выход относительного пути rig за каталог
-персонажа.
-
-## Следующая архитектурная граница
-
-`IWindowPlatformProvider` и событийный Win32 adapter будут добавлены на этапе 2.
-Он будет поставлять ядру снимок физических платформ, не связывая доменную физику
-с `HWND`, DPI или DWM.
-
+Подробности этапа: [STAGE2_IMPLEMENTATION.md](STAGE2_IMPLEMENTATION.md).

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using DesktopPeople.Core;
+using DesktopPeople.Core.Platforms;
 
 namespace DesktopPeople.App;
 
@@ -10,6 +11,10 @@ internal sealed class OverlayForm : Form
     private readonly CharacterStateMachine _stateMachine = new();
     private readonly CharacterPhysics _physics;
     private readonly CharacterRenderer _renderer = new();
+    private readonly IWindowPlatformProvider _windowPlatforms;
+    private readonly PlatformCollisionResolver _collisionResolver = new();
+    private readonly CharacterPlatformAttachment _attachment = new();
+    private readonly CharacterPlatformController _platformController;
     private readonly JsonLineLogger _logger;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
@@ -28,11 +33,20 @@ internal sealed class OverlayForm : Form
     private long _previousPointerTicks;
     private Vec2 _releaseVelocity;
     private string _lastMouseEvent = "none";
+    private string? _currentPlatformId;
+    private double _previousBottom;
+    private double _currentBottom;
+    private bool _showPlatformDebug;
 
-    public OverlayForm(JsonLineLogger logger, int targetFps)
+    public OverlayForm(
+        JsonLineLogger logger,
+        int targetFps,
+        IWindowPlatformProvider windowPlatforms)
     {
         _logger = logger;
+        _windowPlatforms = windowPlatforms;
         _physics = new CharacterPhysics(new Vec2(120, 60), new Size2(94, 178));
+        _platformController = new CharacterPlatformController(_attachment);
 
         AutoScaleMode = AutoScaleMode.Dpi;
         BackColor = TransparencyColor;
@@ -75,6 +89,18 @@ internal sealed class OverlayForm : Form
 
     public CharacterState State => _stateMachine.Current;
 
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShowPlatformDebug
+    {
+        get => _showPlatformDebug;
+        set
+        {
+            _showPlatformDebug = value;
+            Invalidate();
+        }
+    }
+
     public void ShowOverlay()
     {
         Bounds = SystemInformation.VirtualScreen;
@@ -112,6 +138,8 @@ internal sealed class OverlayForm : Form
     {
         base.OnShown(e);
         PositionAtPrimaryScreen();
+        (RectD overlayBounds, RectD virtualBounds) = GetCoordinateSpace();
+        _windowPlatforms.Start(overlayBounds, virtualBounds);
         _logger.Write("overlay_created", new
         {
             virtual_screen = SystemInformation.VirtualScreen.ToString(),
@@ -122,10 +150,19 @@ internal sealed class OverlayForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+#if DEBUG
+        if (_showPlatformDebug)
+        {
+            DrawPlatformDebug(e.Graphics);
+        }
+#endif
         _renderer.Draw(e.Graphics, _physics.Bounds, _stateMachine.Current, _animationTime, _clicked);
 
 #if DEBUG
-        DrawDebugPanel(e.Graphics);
+        if (_showPlatformDebug)
+        {
+            DrawDebugPanel(e.Graphics);
+        }
 #endif
     }
 
@@ -139,6 +176,8 @@ internal sealed class OverlayForm : Form
         }
 
         _isHolding = true;
+        _attachment.Detach();
+        _currentPlatformId = null;
         Capture = true;
         _mouseDown = pointer;
         _previousPointer = pointer;
@@ -221,6 +260,8 @@ internal sealed class OverlayForm : Form
         double delta = (currentTicks - _previousTicks) / (double)Stopwatch.Frequency;
         _previousTicks = currentTicks;
         UpdateFps(delta);
+        (RectD overlayBounds, RectD virtualBounds) = GetCoordinateSpace();
+        _windowPlatforms.Pump(DateTimeOffset.UtcNow, overlayBounds, virtualBounds);
 
         if (!_isPaused)
         {
@@ -232,17 +273,66 @@ internal sealed class OverlayForm : Form
                 _stateMachine.Send(CharacterSignal.Tick);
             }
 
-            (double floor, double left, double right) = GetCurrentWorkArea();
-            PhysicsStepResult result = _physics.Step(
+            PlatformSnapshot snapshot = _windowPlatforms.Snapshot;
+            DesktopPlatform? attachedPlatform = FollowAttachedPlatform(snapshot);
+            (double left, double right) = GetHorizontalBoundaries(attachedPlatform);
+            CharacterMotionStep motion = _physics.Integrate(
                 delta,
                 _stateMachine.Current,
-                floor,
                 left,
                 right);
+            _previousBottom = motion.PreviousBounds.Bottom;
+            _currentBottom = motion.CurrentBounds.Bottom;
 
-            if (result.Landed)
+            if (_stateMachine.Current == CharacterState.Fall)
             {
-                _stateMachine.Send(CharacterSignal.Landed);
+                var collisionPlatforms = new List<DesktopPlatform>(snapshot.Platforms.Length + 1);
+                collisionPlatforms.AddRange(snapshot.Platforms);
+                collisionPlatforms.Add(CreateDesktopPlatform());
+                PlatformCollision? collision = _collisionResolver.ResolveDownward(
+                    motion.PreviousBounds,
+                    motion.CurrentBounds,
+                    _physics.Velocity.Y,
+                    collisionPlatforms);
+                if (collision is not null)
+                {
+                    _physics.LandOn(collision.Value.Segment.SurfaceY);
+                    _currentPlatformId = collision.Value.Platform.Id;
+                    if (collision.Value.Platform.Kind == PlatformKind.Window)
+                    {
+                        _attachment.Attach(collision.Value.Platform, _physics.Bounds);
+                    }
+                    else
+                    {
+                        _attachment.Detach();
+                    }
+
+                    _logger.Write("character_landed_on_platform", new
+                    {
+                        platform = collision.Value.Platform.Id,
+                        kind = collision.Value.Platform.Kind.ToString(),
+                        surface_y = collision.Value.Segment.SurfaceY,
+                    });
+                    _stateMachine.Send(CharacterSignal.Landed);
+                }
+            }
+            else if (attachedPlatform is not null &&
+                     _stateMachine.Current is CharacterState.Idle or CharacterState.Walk)
+            {
+                PlatformSegment? support = _attachment.FindSupportingSegment(
+                    attachedPlatform,
+                    _physics.Bounds);
+                if (support is null)
+                {
+                    LosePlatformSupport();
+                }
+                else
+                {
+                    _physics.SetPosition(new Vec2(
+                        _physics.Position.X,
+                        support.Value.SurfaceY - _physics.Size.Height - _attachment.VerticalOffset));
+                    _attachment.Sync(attachedPlatform, _physics.Bounds);
+                }
             }
 
             UpdateAutonomousBehavior();
@@ -268,6 +358,84 @@ internal sealed class OverlayForm : Form
         {
             _stateMachine.Send(CharacterSignal.StopRequested);
         }
+    }
+
+    private DesktopPlatform? FollowAttachedPlatform(PlatformSnapshot snapshot)
+    {
+        bool attached = _platformController.TryFollow(
+            snapshot,
+            _physics,
+            _stateMachine,
+            out DesktopPlatform? platform,
+            out string? lostPlatform);
+        if (lostPlatform is not null)
+        {
+            _currentPlatformId = null;
+            _logger.Write("character_platform_lost", new { platform = lostPlatform });
+        }
+
+        _currentPlatformId = attached ? platform!.Id : _currentPlatformId;
+        return attached ? platform : null;
+    }
+
+    private (double Left, double Right) GetHorizontalBoundaries(DesktopPlatform? attachedPlatform)
+    {
+        if (attachedPlatform is not null)
+        {
+            PlatformSegment? segment = _attachment.FindSupportingSegment(
+                attachedPlatform,
+                _physics.Bounds);
+            if (segment is not null)
+            {
+                const double footWidthRatio = 0.42;
+                double overhang = (_physics.Size.Width - (_physics.Size.Width * footWidthRatio)) / 2;
+                return (segment.Value.Left - overhang, segment.Value.Right + overhang);
+            }
+        }
+
+        (_, double left, double right) = GetCurrentWorkArea();
+        return (left, right);
+    }
+
+    private DesktopPlatform CreateDesktopPlatform()
+    {
+        (double floor, double left, double right) = GetCurrentWorkArea();
+        return new DesktopPlatform
+        {
+            Id = "desktop:work-area",
+            Kind = PlatformKind.Desktop,
+            Bounds = new RectD(left, floor, right - left, 1),
+            Segments = [new PlatformSegment(left, right, floor)],
+            ZOrder = int.MaxValue,
+            MonitorId = "work-area",
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
+    private void LosePlatformSupport()
+    {
+        if (!_attachment.IsAttached)
+        {
+            return;
+        }
+
+        string? lostPlatform = _attachment.PlatformId;
+        _attachment.Detach();
+        _currentPlatformId = null;
+        _stateMachine.Send(CharacterSignal.SupportLost);
+        _logger.Write("character_platform_lost", new { platform = lostPlatform });
+    }
+
+    private (RectD OverlayBounds, RectD VirtualBounds) GetCoordinateSpace()
+    {
+        Rectangle virtualScreen = SystemInformation.VirtualScreen;
+        return (
+            new RectD(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height),
+            new RectD(
+                virtualScreen.X,
+                virtualScreen.Y,
+                virtualScreen.Width,
+                virtualScreen.Height));
     }
 
     private void UpdateClickThrough()
@@ -341,10 +509,73 @@ internal sealed class OverlayForm : Form
     }
 
 #if DEBUG
+    private void DrawPlatformDebug(Graphics graphics)
+    {
+        using var boundsPen = new Pen(Color.FromArgb(150, 68, 204, 255), 1)
+        {
+            DashStyle = System.Drawing.Drawing2D.DashStyle.Dash,
+        };
+        using var surfacePen = new Pen(Color.FromArgb(230, 255, 196, 64), 3);
+        using var labelBrush = new SolidBrush(Color.FromArgb(230, 255, 255, 255));
+        using var labelBackground = new SolidBrush(Color.FromArgb(180, 24, 27, 37));
+
+        foreach (DesktopPlatform platform in _windowPlatforms.Snapshot.Platforms)
+        {
+            RectD bounds = platform.Bounds;
+            graphics.DrawRectangle(
+                boundsPen,
+                (float)bounds.X,
+                (float)bounds.Y,
+                (float)bounds.Width,
+                (float)bounds.Height);
+            foreach (PlatformSegment segment in platform.Segments)
+            {
+                graphics.DrawLine(
+                    surfacePen,
+                    (float)segment.Left,
+                    (float)segment.SurfaceY,
+                    (float)segment.Right,
+                    (float)segment.SurfaceY);
+            }
+
+            string label = $"{platform.Id}  HWND 0x{platform.ExternalHandle:X}";
+            SizeF labelSize = graphics.MeasureString(label, Font);
+            graphics.FillRectangle(
+                labelBackground,
+                (float)bounds.X,
+                (float)bounds.Y - labelSize.Height,
+                labelSize.Width + 6,
+                labelSize.Height);
+            graphics.DrawString(
+                label,
+                Font,
+                labelBrush,
+                (float)bounds.X + 3,
+                (float)bounds.Y - labelSize.Height);
+        }
+
+        (double footLeft, double footRight) = _collisionResolver.GetFootInterval(_physics.Bounds);
+        using var footPen = new Pen(Color.LimeGreen, 4);
+        graphics.DrawLine(
+            footPen,
+            (float)footLeft,
+            (float)_physics.Bounds.Bottom,
+            (float)footRight,
+            (float)_physics.Bounds.Bottom);
+
+        if (_attachment.IsAttached)
+        {
+            using var attachmentBrush = new SolidBrush(Color.HotPink);
+            float x = (float)(_attachment.LastPlatformBounds.X + _attachment.RelativeFootCenterX);
+            float y = (float)_physics.Bounds.Bottom;
+            graphics.FillEllipse(attachmentBrush, x - 5, y - 5, 10, 10);
+        }
+    }
+
     private void DrawDebugPanel(Graphics graphics)
     {
         const int width = 250;
-        const int height = 144;
+        const int height = 190;
         using var background = new SolidBrush(Color.FromArgb(220, 27, 29, 40));
         using var text = new SolidBrush(Color.White);
         graphics.FillRectangle(background, 14, 14, width, height);
@@ -354,8 +585,10 @@ internal sealed class OverlayForm : Form
             $"FPS: {_fps:F0}\n" +
             $"State: {_stateMachine.Current}\n" +
             $"Velocity: {_physics.Velocity.X:F0}, {_physics.Velocity.Y:F0}\n" +
-            $"Platform: desktop work area\n" +
-            $"Windows: 0 (этап 2)\n" +
+            $"Platform: {_currentPlatformId ?? "none"}\n" +
+            $"Windows: {_windowPlatforms.Snapshot.Platforms.Length}\n" +
+            $"Attached: {_attachment.IsAttached}\n" +
+            $"Sweep Y: {_previousBottom:F0} → {_currentBottom:F0}\n" +
             $"Mouse: {_lastMouseEvent}\n" +
             $"Clip: {_stateMachine.Current.ToString().ToLowerInvariant()}";
         graphics.DrawString(details, Font, text, new RectangleF(26, 24, width - 20, height - 16));

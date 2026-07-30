@@ -38,6 +38,22 @@ public sealed class CharacterPhysics
         Velocity = velocity.ClampMagnitude(MaximumThrowSpeed);
     }
 
+    public void SetPosition(Vec2 position)
+    {
+        if (!double.IsFinite(position.X) || !double.IsFinite(position.Y))
+        {
+            throw new ArgumentOutOfRangeException(nameof(position));
+        }
+
+        Position = position;
+    }
+
+    public void LandOn(double surfaceY)
+    {
+        Position = new Vec2(Position.X, surfaceY - Size.Height);
+        Velocity = new Vec2(Velocity.X, 0);
+    }
+
     public PhysicsStepResult Step(
         double elapsedSeconds,
         CharacterState state,
@@ -45,10 +61,32 @@ public sealed class CharacterPhysics
         double leftBoundary,
         double rightBoundary)
     {
+        CharacterMotionStep motion = Integrate(
+            elapsedSeconds,
+            state,
+            leftBoundary,
+            rightBoundary);
+        bool landed = false;
+        if (Position.Y + Size.Height >= floorY && Velocity.Y >= 0)
+        {
+            LandOn(floorY);
+            landed = state == CharacterState.Fall;
+        }
+
+        return new PhysicsStepResult(landed, motion.HitHorizontalEdge);
+    }
+
+    public CharacterMotionStep Integrate(
+        double elapsedSeconds,
+        CharacterState state,
+        double leftBoundary,
+        double rightBoundary)
+    {
+        RectD previousBounds = Bounds;
         double delta = Math.Clamp(elapsedSeconds, 0, 0.05);
         if (state is CharacterState.HeldByMouse or CharacterState.Disabled)
         {
-            return PhysicsStepResult.None;
+            return new CharacterMotionStep(previousBounds, previousBounds, false);
         }
 
         bool hitHorizontalEdge = false;
@@ -88,22 +126,18 @@ public sealed class CharacterPhysics
             hitHorizontalEdge = true;
         }
 
-        bool landed = false;
-        if (y + Size.Height >= floorY && velocityY >= 0)
-        {
-            y = floorY - Size.Height;
-            velocityY = 0;
-            landed = state == CharacterState.Fall;
-        }
-
         Position = new Vec2(x, y);
         Velocity = new Vec2(velocityX, velocityY);
-        return new PhysicsStepResult(landed, hitHorizontalEdge);
+        return new CharacterMotionStep(previousBounds, Bounds, hitHorizontalEdge);
     }
 }
+
+public readonly record struct CharacterMotionStep(
+    RectD PreviousBounds,
+    RectD CurrentBounds,
+    bool HitHorizontalEdge);
 
 public readonly record struct PhysicsStepResult(bool Landed, bool HitHorizontalEdge)
 {
     public static PhysicsStepResult None => new(false, false);
 }
-

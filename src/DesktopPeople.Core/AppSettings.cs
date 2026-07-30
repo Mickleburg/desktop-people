@@ -12,6 +12,8 @@ public sealed record AppSettings
 
     public string BehaviorIntensity { get; init; } = "normal";
 
+    public bool ShowPlatformDebug { get; init; }
+
     public AppSettings Normalize() => this with
     {
         TargetFps = TargetFps is 30 or 60 ? TargetFps : 60,
@@ -72,4 +74,3 @@ public sealed class SettingsStore
         File.Move(temporaryPath, _path, true);
     }
 }
-
