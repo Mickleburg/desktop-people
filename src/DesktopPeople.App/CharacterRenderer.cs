@@ -3,13 +3,20 @@ using DesktopPeople.Core;
 
 namespace DesktopPeople.App;
 
+internal readonly record struct CharacterPose(
+    CharacterState State,
+    double AnimationTime,
+    bool Clicked,
+    double CrouchAmount,
+    Vec2 GazeTarget);
+
 internal sealed class CharacterRenderer
 {
     private static readonly Color Ink = Color.FromArgb(41, 45, 62);
     private static readonly Color Accent = Color.FromArgb(111, 92, 255);
     private static readonly Color AccentWarm = Color.FromArgb(255, 125, 94);
 
-    public void Draw(Graphics graphics, RectD body, CharacterState state, double animationTime, bool clicked)
+    public void Draw(Graphics graphics, RectD body, CharacterPose pose)
     {
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
@@ -18,19 +25,24 @@ internal sealed class CharacterRenderer
         float y = (float)body.Y;
         float width = (float)body.Width;
         float height = (float)body.Height;
-        float bob = state == CharacterState.Walk
-            ? (float)(Math.Sin(animationTime * 11) * 2.5)
-            : 0;
-        float stride = state == CharacterState.Walk
-            ? (float)(Math.Sin(animationTime * 11) * 13)
-            : 0;
+
+        bool running = pose.State == CharacterState.Run;
+        bool locomoting = pose.State is CharacterState.Walk or CharacterState.Run;
+        double cadence = running ? 15 : 11;
+        float bobAmplitude = running ? 4.5f : 2.5f;
+        float strideAmplitude = running ? 20f : 13f;
+        float bob = locomoting ? (float)(Math.Sin(pose.AnimationTime * cadence) * bobAmplitude) : 0;
+        float stride = locomoting ? (float)(Math.Sin(pose.AnimationTime * cadence) * strideAmplitude) : 0;
+        // Sitting, the landing impact, and standing back up all share the same
+        // knees-bent silhouette; only how CrouchAmount got to its value differs.
+        float crouch = (float)(Math.Clamp(pose.CrouchAmount, 0, 1) * 24);
 
         using var outline = new Pen(Ink, 5)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round,
         };
-        using var bodyBrush = new SolidBrush(clicked ? AccentWarm : Accent);
+        using var bodyBrush = new SolidBrush(pose.Clicked ? AccentWarm : Accent);
         using var faceBrush = new SolidBrush(Color.FromArgb(255, 222, 191));
         using var whiteBrush = new SolidBrush(Color.White);
         using var shadowBrush = new SolidBrush(Color.FromArgb(48, 30, 31, 43));
@@ -39,15 +51,13 @@ internal sealed class CharacterRenderer
 
         float headSize = width * 0.52f;
         float headX = x + ((width - headSize) / 2);
-        float headY = y + 3 + bob;
+        float headY = y + 3 + bob + crouch;
         graphics.FillEllipse(faceBrush, headX, headY, headSize, headSize);
         graphics.DrawEllipse(outline, headX, headY, headSize, headSize);
 
         float eyeY = headY + (headSize * 0.46f);
-        graphics.FillEllipse(whiteBrush, headX + 16, eyeY, 9, 9);
-        graphics.FillEllipse(whiteBrush, headX + headSize - 25, eyeY, 9, 9);
-        graphics.FillEllipse(Brushes.Black, headX + 19, eyeY + 2, 5, 5);
-        graphics.FillEllipse(Brushes.Black, headX + headSize - 22, eyeY + 2, 5, 5);
+        DrawEye(graphics, headX + 16, eyeY, pose.GazeTarget, whiteBrush);
+        DrawEye(graphics, headX + headSize - 25, eyeY, pose.GazeTarget, whiteBrush);
 
         float torsoTop = headY + headSize - 2;
         var torso = new RectangleF(x + 27, torsoTop, width - 54, height * 0.34f);
@@ -58,7 +68,7 @@ internal sealed class CharacterRenderer
         float hipY = torso.Bottom - 2;
         float legBottom = y + height - 9;
 
-        if (state == CharacterState.Fall)
+        if (pose.State == CharacterState.Fall)
         {
             graphics.DrawLine(outline, torso.Left + 4, shoulderY, x + 5, shoulderY - 22);
             graphics.DrawLine(outline, torso.Right - 4, shoulderY, x + width - 5, shoulderY - 22);
@@ -72,12 +82,30 @@ internal sealed class CharacterRenderer
         graphics.DrawLine(outline, torso.Left + 14, hipY, x + 25 + stride, legBottom);
         graphics.DrawLine(outline, torso.Right - 14, hipY, x + width - 25 - stride, legBottom);
 
-        if (state == CharacterState.HeldByMouse)
+        if (pose.State == CharacterState.HeldByMouse)
         {
             using var heldBrush = new SolidBrush(Color.FromArgb(220, 255, 255, 255));
             graphics.FillEllipse(heldBrush, x + width - 24, y - 4, 24, 24);
             graphics.DrawEllipse(outline, x + width - 24, y - 4, 24, 24);
         }
+    }
+
+    private static void DrawEye(Graphics graphics, float socketX, float socketY, Vec2 gazeTarget, Brush whiteBrush)
+    {
+        graphics.FillEllipse(whiteBrush, socketX, socketY, 9, 9);
+
+        const double pupilRange = 2.2;
+        var eyeCenter = new Vec2(socketX + 4.5, socketY + 4.5);
+        Vec2 toTarget = gazeTarget - eyeCenter;
+        double distance = toTarget.Length;
+        Vec2 pupilOffset = distance > 0.01 ? toTarget * (Math.Min(pupilRange, distance) / distance) : Vec2.Zero;
+
+        graphics.FillEllipse(
+            Brushes.Black,
+            (float)(socketX + 3 + pupilOffset.X),
+            (float)(socketY + 2 + pupilOffset.Y),
+            5,
+            5);
     }
 }
 

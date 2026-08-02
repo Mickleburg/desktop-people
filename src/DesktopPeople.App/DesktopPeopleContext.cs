@@ -14,6 +14,7 @@ internal sealed class DesktopPeopleContext : ApplicationContext
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _visibilityItem;
     private readonly ToolStripMenuItem _pauseItem;
+    private readonly Dictionary<string, ToolStripMenuItem> _intensityItems = [];
     private AppSettings _settings;
     private bool _exiting;
 
@@ -47,6 +48,7 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         {
             IsPaused = _settings.IsPaused,
             ShowPlatformDebug = _settings.ShowPlatformDebug,
+            BehaviorIntensity = _settings.BehaviorIntensity,
         };
         _launcher.ReleaseRequested += (_, _) =>
         {
@@ -71,6 +73,7 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         };
         _pauseItem.Click += (_, _) => TogglePause();
         menu.Items.Add(_pauseItem);
+        menu.Items.Add(BuildIntensityMenu());
 #if DEBUG
         var debugItem = new ToolStripMenuItem("Developer: платформы")
         {
@@ -155,6 +158,35 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         _overlay.IsPaused = _pauseItem.Checked;
         SaveSettings(_settings with { IsPaused = _pauseItem.Checked });
         _logger.Write("pause_changed", new { paused = _pauseItem.Checked });
+    }
+
+    private ToolStripMenuItem BuildIntensityMenu()
+    {
+        var root = new ToolStripMenuItem("Активность");
+        AddIntensityOption(root, "calm", "Спокойно");
+        AddIntensityOption(root, "normal", "Обычно");
+        AddIntensityOption(root, "active", "Активно");
+        return root;
+    }
+
+    private void AddIntensityOption(ToolStripMenuItem root, string intensity, string label)
+    {
+        var item = new ToolStripMenuItem(label) { Checked = _settings.BehaviorIntensity == intensity };
+        item.Click += (_, _) => SetIntensity(intensity);
+        _intensityItems[intensity] = item;
+        root.DropDownItems.Add(item);
+    }
+
+    private void SetIntensity(string intensity)
+    {
+        foreach ((string key, ToolStripMenuItem item) in _intensityItems)
+        {
+            item.Checked = key == intensity;
+        }
+
+        _overlay.BehaviorIntensity = intensity;
+        SaveSettings(_settings with { BehaviorIntensity = intensity });
+        _logger.Write("behavior_intensity_changed", new { intensity });
     }
 
     private void SaveSettings(AppSettings settings)

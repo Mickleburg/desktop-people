@@ -26,6 +26,17 @@ renderer/scene host на Godot.
 фотографическими альфа-краями необходимо проверить per-pixel layered window
 (`UpdateLayeredWindow`) либо Godot viewport.
 
+Дополнение (2026-08-02): этап 2 подтвердил самый рискованный элемент (overlay +
+selective click-through + физика окон), что и было условием пересмотра этого
+ADR. Пользователь решил переоценить Godot 4 + C# именно для визуального
+rig renderer этапа 3, поскольку GDI+/`TransparencyKey` не даёт качественной
+skeletal-анимации. Поведение и state machine (инкремент 3a: run/sit,
+взгляд на курсор, интенсивность) реализованы на текущем WinForms runtime — это
+не зависит от выбора движка. Миграция рендерера (инкремент 3b) требует
+отдельного scoping: заменить только renderer/scene host, сохранив
+`DesktopPeople.Core` (state machine, physics, platform geometry) как есть, либо
+перенести весь runtime. Решение по объёму миграции не принято.
+
 ## ADR-002: тестовый runner без внешних test-пакетов
 
 Статус: принято.

@@ -32,7 +32,14 @@ public sealed class CharacterStateMachine
             (CharacterState.Spawn, CharacterSignal.Tick) => CharacterState.Fall,
             (CharacterState.Fall, CharacterSignal.Landed) => CharacterState.Idle,
             (CharacterState.Idle, CharacterSignal.WalkRequested) => CharacterState.Walk,
+            (CharacterState.Idle, CharacterSignal.RunRequested) => CharacterState.Run,
+            (CharacterState.Idle, CharacterSignal.SitRequested) => CharacterState.Sit,
             (CharacterState.Walk, CharacterSignal.StopRequested) => CharacterState.Idle,
+            (CharacterState.Walk, CharacterSignal.RunRequested) => CharacterState.Run,
+            (CharacterState.Walk, CharacterSignal.SitRequested) => CharacterState.Sit,
+            (CharacterState.Run, CharacterSignal.StopRequested) => CharacterState.Idle,
+            (CharacterState.Run, CharacterSignal.SitRequested) => CharacterState.Sit,
+            (CharacterState.Sit, CharacterSignal.StandRequested) => CharacterState.Idle,
             _ => current,
         };
 }

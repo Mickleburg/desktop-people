@@ -4,6 +4,7 @@ public sealed class CharacterPhysics
 {
     private const double Gravity = 1_850;
     private const double WalkSpeed = 92;
+    private const double RunSpeed = 190;
     private const double MaximumThrowSpeed = 1_600;
 
     public CharacterPhysics(Vec2 position, Size2 size)
@@ -97,7 +98,11 @@ public sealed class CharacterPhysics
         {
             velocityX = WalkDirection * WalkSpeed;
         }
-        else if (state == CharacterState.Idle)
+        else if (state == CharacterState.Run)
+        {
+            velocityX = WalkDirection * RunSpeed;
+        }
+        else if (state is CharacterState.Idle or CharacterState.Sit)
         {
             velocityX = 0;
             velocityY = 0;

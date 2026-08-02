@@ -8,8 +8,13 @@ internal static class LegacyTests
     [
         new("state machine follows the runtime lifecycle", StateMachineLifecycle),
         new("state machine can be disabled safely", StateMachineDisable),
+        new("state machine supports run and sit", StateMachineRunAndSit),
+        new("support lost falls from run or sit", StateMachineSupportLostFromRunOrSit),
         new("falling body lands on the desktop", PhysicsLanding),
         new("held body follows the pointer", PhysicsHold),
+        new("running body covers more ground than walking", PhysicsRunIsFasterThanWalk),
+        new("behavior tuning picks sit, run, or walk by roll", BehaviorTuningPicksByRoll),
+        new("behavior tuning maps known intensities", BehaviorTuningMapsIntensities),
         new("settings survive a round trip", SettingsRoundTrip),
         new("avatar manifest survives a round trip", AvatarRoundTrip),
         new("avatar manifest rejects escaping paths", AvatarRejectsTraversal),
@@ -39,6 +44,62 @@ internal static class LegacyTests
         AssertEx.False(machine.Send(CharacterSignal.WalkRequested));
         machine.Send(CharacterSignal.Enable);
         AssertEx.Equal(CharacterState.Fall, machine.Current);
+    }
+
+    private static void StateMachineRunAndSit()
+    {
+        var machine = new CharacterStateMachine();
+        machine.Send(CharacterSignal.Tick);
+        machine.Send(CharacterSignal.Landed);
+        AssertEx.True(machine.Send(CharacterSignal.RunRequested));
+        AssertEx.Equal(CharacterState.Run, machine.Current);
+        AssertEx.True(machine.Send(CharacterSignal.SitRequested));
+        AssertEx.Equal(CharacterState.Sit, machine.Current);
+        AssertEx.True(machine.Send(CharacterSignal.StandRequested));
+        AssertEx.Equal(CharacterState.Idle, machine.Current);
+    }
+
+    private static void StateMachineSupportLostFromRunOrSit()
+    {
+        var machine = new CharacterStateMachine();
+        machine.Send(CharacterSignal.Tick);
+        machine.Send(CharacterSignal.Landed);
+        machine.Send(CharacterSignal.SitRequested);
+        AssertEx.True(machine.Send(CharacterSignal.SupportLost));
+        AssertEx.Equal(CharacterState.Fall, machine.Current);
+    }
+
+    private static void PhysicsRunIsFasterThanWalk()
+    {
+        var walker = new CharacterPhysics(Vec2.Zero, new Size2(20, 40));
+        var runner = new CharacterPhysics(Vec2.Zero, new Size2(20, 40));
+        walker.Integrate(1, CharacterState.Walk, -10_000, 10_000);
+        runner.Integrate(1, CharacterState.Run, -10_000, 10_000);
+        AssertEx.True(runner.Position.X > walker.Position.X);
+    }
+
+    private static void BehaviorTuningPicksByRoll()
+    {
+        var tuning = new CharacterBehaviorTuning(
+            IdleDelay: 1,
+            WalkDuration: 1,
+            RunDuration: 1,
+            SitDuration: 1,
+            SitChance: 0.3,
+            RunChance: 0.2);
+        AssertEx.Equal(CharacterSignal.SitRequested, tuning.PickAutonomousTransition(0.1));
+        AssertEx.Equal(CharacterSignal.RunRequested, tuning.PickAutonomousTransition(0.4));
+        AssertEx.Equal(CharacterSignal.WalkRequested, tuning.PickAutonomousTransition(0.9));
+    }
+
+    private static void BehaviorTuningMapsIntensities()
+    {
+        CharacterBehaviorTuning calm = CharacterBehaviorTuning.ForIntensity("calm");
+        CharacterBehaviorTuning active = CharacterBehaviorTuning.ForIntensity("active");
+        CharacterBehaviorTuning fallback = CharacterBehaviorTuning.ForIntensity("unknown");
+        AssertEx.Equal(CharacterBehaviorTuning.ForIntensity("normal"), fallback);
+        AssertEx.True(active.RunChance > calm.RunChance);
+        AssertEx.True(calm.SitChance > active.SitChance);
     }
 
     private static void PhysicsLanding()

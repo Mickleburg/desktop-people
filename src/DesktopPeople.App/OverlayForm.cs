@@ -7,6 +7,7 @@ namespace DesktopPeople.App;
 
 internal sealed class OverlayForm : Form
 {
+    private const double CrouchTransitionDuration = 0.18;
     private static readonly Color TransparencyColor = Color.Fuchsia;
     private readonly CharacterStateMachine _stateMachine = new();
     private readonly CharacterPhysics _physics;
@@ -37,6 +38,12 @@ internal sealed class OverlayForm : Form
     private double _previousBottom;
     private double _currentBottom;
     private bool _showPlatformDebug;
+    private CharacterBehaviorTuning _behaviorTuning = CharacterBehaviorTuning.ForIntensity("normal");
+    private string _behaviorIntensity = "normal";
+    private Vec2 _gazeTarget;
+    private double _crouchAmount;
+    private double _crouchTransitionStart;
+    private double _crouchTransitionElapsed = double.PositiveInfinity;
 
     public OverlayForm(
         JsonLineLogger logger,
@@ -88,6 +95,18 @@ internal sealed class OverlayForm : Form
     }
 
     public CharacterState State => _stateMachine.Current;
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string BehaviorIntensity
+    {
+        get => _behaviorIntensity;
+        set
+        {
+            _behaviorIntensity = value;
+            _behaviorTuning = CharacterBehaviorTuning.ForIntensity(value);
+        }
+    }
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -156,7 +175,10 @@ internal sealed class OverlayForm : Form
             DrawPlatformDebug(e.Graphics);
         }
 #endif
-        _renderer.Draw(e.Graphics, _physics.Bounds, _stateMachine.Current, _animationTime, _clicked);
+        _renderer.Draw(
+            e.Graphics,
+            _physics.Bounds,
+            new CharacterPose(_stateMachine.Current, _animationTime, _clicked, _crouchAmount, _gazeTarget));
 
 #if DEBUG
         if (_showPlatformDebug)
@@ -263,10 +285,14 @@ internal sealed class OverlayForm : Form
         (RectD overlayBounds, RectD virtualBounds) = GetCoordinateSpace();
         _windowPlatforms.Pump(DateTimeOffset.UtcNow, overlayBounds, virtualBounds);
 
+        Point clientPointer = IsHandleCreated ? PointToClient(Cursor.Position) : Point.Empty;
+        _gazeTarget = new Vec2(clientPointer.X, clientPointer.Y);
+
         if (!_isPaused)
         {
             _animationTime += delta;
             _stateTime += delta;
+            UpdateCrouchAmount(delta);
 
             if (_stateMachine.Current == CharacterState.Spawn)
             {
@@ -317,7 +343,8 @@ internal sealed class OverlayForm : Form
                 }
             }
             else if (attachedPlatform is not null &&
-                     _stateMachine.Current is CharacterState.Idle or CharacterState.Walk)
+                     _stateMachine.Current is CharacterState.Idle or CharacterState.Walk
+                         or CharacterState.Run or CharacterState.Sit)
             {
                 PlatformSegment? support = _attachment.FindSupportingSegment(
                     attachedPlatform,
@@ -342,22 +369,47 @@ internal sealed class OverlayForm : Form
             }
         }
 
-        UpdateClickThrough();
+        UpdateClickThrough(clientPointer);
         Invalidate();
     }
 
     private void UpdateAutonomousBehavior()
     {
-        double idleDelay = 2.4;
-        double walkDuration = 3.8;
-        if (_stateMachine.Current == CharacterState.Idle && _stateTime >= idleDelay)
+        switch (_stateMachine.Current)
         {
-            _stateMachine.Send(CharacterSignal.WalkRequested);
+            case CharacterState.Idle when _stateTime >= _behaviorTuning.IdleDelay:
+                _stateMachine.Send(_behaviorTuning.PickAutonomousTransition(Random.Shared.NextDouble()));
+                break;
+            case CharacterState.Walk when _stateTime >= _behaviorTuning.WalkDuration:
+                _stateMachine.Send(CharacterSignal.StopRequested);
+                break;
+            case CharacterState.Run when _stateTime >= _behaviorTuning.RunDuration:
+                _stateMachine.Send(CharacterSignal.StopRequested);
+                break;
+            case CharacterState.Sit when _stateTime >= _behaviorTuning.SitDuration:
+                _stateMachine.Send(CharacterSignal.StandRequested);
+                break;
         }
-        else if (_stateMachine.Current == CharacterState.Walk && _stateTime >= walkDuration)
+    }
+
+    private void UpdateCrouchAmount(double delta)
+    {
+        if (_stateMachine.Current == CharacterState.Sit)
         {
-            _stateMachine.Send(CharacterSignal.StopRequested);
+            _crouchAmount = 1;
+            _crouchTransitionElapsed = double.PositiveInfinity;
+            return;
         }
+
+        if (_crouchTransitionElapsed >= CrouchTransitionDuration)
+        {
+            _crouchAmount = 0;
+            return;
+        }
+
+        _crouchTransitionElapsed += delta;
+        double t = Math.Clamp(_crouchTransitionElapsed / CrouchTransitionDuration, 0, 1);
+        _crouchAmount = _crouchTransitionStart * (1 - t);
     }
 
     private DesktopPlatform? FollowAttachedPlatform(PlatformSnapshot snapshot)
@@ -439,14 +491,13 @@ internal sealed class OverlayForm : Form
                 virtualScreen.Height));
     }
 
-    private void UpdateClickThrough()
+    private void UpdateClickThrough(Point clientPointer)
     {
         if (!IsHandleCreated || !Visible)
         {
             return;
         }
 
-        Point clientPointer = PointToClient(Cursor.Position);
         bool overCharacter = _physics.Bounds.Inflate(8, 8).Contains(
             new Vec2(clientPointer.X, clientPointer.Y));
         bool shouldClickThrough = !_isHolding && !overCharacter;
@@ -491,6 +542,17 @@ internal sealed class OverlayForm : Form
         CharacterSignal signal)
     {
         _stateTime = 0;
+        if (signal == CharacterSignal.Landed)
+        {
+            _crouchTransitionStart = 0.6;
+            _crouchTransitionElapsed = 0;
+        }
+        else if (previous == CharacterState.Sit && current != CharacterState.Sit)
+        {
+            _crouchTransitionStart = 1;
+            _crouchTransitionElapsed = 0;
+        }
+
         _logger.Write("character_state_changed", new
         {
             previous = previous.ToString(),
