@@ -8,11 +8,13 @@ public sealed record AppSettings
 
     public bool IsPaused { get; init; }
 
-    public bool CharactersVisible { get; init; } = true;
+    public bool CharactersVisible { get; init; }
 
     public string BehaviorIntensity { get; init; } = "normal";
 
     public bool ShowPlatformDebug { get; init; }
+
+    public double CharacterScale { get; init; } = 1.0;
 
     public AppSettings Normalize() => this with
     {
@@ -20,6 +22,7 @@ public sealed record AppSettings
         BehaviorIntensity = BehaviorIntensity is "calm" or "normal" or "active"
             ? BehaviorIntensity
             : "normal",
+        CharacterScale = Math.Clamp(CharacterScale is > 0 and < double.PositiveInfinity ? CharacterScale : 1.0, 0.7, 1.6),
     };
 }
 

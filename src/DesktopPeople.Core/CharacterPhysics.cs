@@ -17,7 +17,7 @@ public sealed class CharacterPhysics
 
     public Vec2 Velocity { get; private set; }
 
-    public Size2 Size { get; }
+    public Size2 Size { get; private set; }
 
     public int WalkDirection { get; private set; } = 1;
 
@@ -54,6 +54,25 @@ public sealed class CharacterPhysics
         Position = new Vec2(Position.X, surfaceY - Size.Height);
         Velocity = new Vec2(Velocity.X, 0);
     }
+
+    public void BonkCeiling(double ceilingY)
+    {
+        Position = new Vec2(Position.X, ceilingY);
+        Velocity = new Vec2(Velocity.X, 0);
+    }
+
+    /// <summary>Resizes the character in place, keeping its feet planted at the same
+    /// bottom-center point so a live scale change doesn't shift it off its platform.</summary>
+    public void Rescale(Size2 newSize)
+    {
+        double feetCenterX = Position.X + (Size.Width / 2);
+        double feetBottomY = Position.Y + Size.Height;
+        Size = newSize;
+        Position = new Vec2(feetCenterX - (newSize.Width / 2), feetBottomY - newSize.Height);
+    }
+
+    /// <summary>Overrides which way the character is facing/walking, e.g. to flee a cursor.</summary>
+    public void FaceDirection(int direction) => WalkDirection = direction >= 0 ? 1 : -1;
 
     public PhysicsStepResult Step(
         double elapsedSeconds,
@@ -102,7 +121,7 @@ public sealed class CharacterPhysics
         {
             velocityX = WalkDirection * RunSpeed;
         }
-        else if (state is CharacterState.Idle or CharacterState.Sit)
+        else if (state is CharacterState.Idle or CharacterState.Sit or CharacterState.Climb or CharacterState.Hide)
         {
             velocityX = 0;
             velocityY = 0;

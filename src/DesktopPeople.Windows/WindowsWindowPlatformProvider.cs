@@ -201,6 +201,7 @@ public sealed class WindowsWindowPlatformProvider : IWindowPlatformProvider
                 candidate.ScreenBounds,
                 _overlayScreenBounds);
             double surfaceY = bounds.Y + SurfaceOffset;
+            double ceilingY = bounds.Bottom - SurfaceOffset;
             platforms.Add(new DesktopPlatform
             {
                 Id = $"window:{candidate.Handle:X}",
@@ -208,6 +209,7 @@ public sealed class WindowsWindowPlatformProvider : IWindowPlatformProvider
                 ExternalHandle = candidate.Handle,
                 Bounds = bounds,
                 Segments = [new PlatformSegment(bounds.X, bounds.Right, surfaceY)],
+                CeilingSegments = [new PlatformSegment(bounds.X, bounds.Right, ceilingY)],
                 ZOrder = candidate.ZOrder,
                 MonitorId = candidate.MonitorId,
                 MonitorTop = candidate.MonitorTop - _overlayScreenBounds.Y,

@@ -49,12 +49,17 @@ internal sealed class DesktopPeopleContext : ApplicationContext
             IsPaused = _settings.IsPaused,
             ShowPlatformDebug = _settings.ShowPlatformDebug,
             BehaviorIntensity = _settings.BehaviorIntensity,
+            CharacterScale = _settings.CharacterScale,
         };
+        _launcher.SelectedIntensity = _settings.BehaviorIntensity;
+        _launcher.SelectedScalePercent = (int)Math.Round(_settings.CharacterScale * 100);
         _launcher.ReleaseRequested += (_, _) =>
         {
             ShowCharacters();
             _launcher.Hide();
         };
+        _launcher.IntensityChanged += SetIntensity;
+        _launcher.ScaleChanged += SetScale;
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Открыть DesktopPeople", null, (_, _) => OpenLauncher());
@@ -99,11 +104,10 @@ internal sealed class DesktopPeopleContext : ApplicationContext
         };
         _tray.DoubleClick += (_, _) => OpenLauncher();
 
+        // The character only appears after the user presses "Release" (or the tray
+        // toggle) this session — never automatically on launch, even if it was
+        // visible when the app last closed.
         _launcher.Show();
-        if (_settings.CharactersVisible)
-        {
-            _overlay.ShowOverlay();
-        }
 
         _windowPlatforms.SetExplicitlyExcludedHandles(
         [
@@ -184,9 +188,18 @@ internal sealed class DesktopPeopleContext : ApplicationContext
             item.Checked = key == intensity;
         }
 
+        _launcher.SelectedIntensity = intensity;
         _overlay.BehaviorIntensity = intensity;
         SaveSettings(_settings with { BehaviorIntensity = intensity });
         _logger.Write("behavior_intensity_changed", new { intensity });
+    }
+
+    private void SetScale(int percent)
+    {
+        double scale = percent / 100.0;
+        _overlay.CharacterScale = scale;
+        SaveSettings(_settings with { CharacterScale = scale });
+        _logger.Write("character_scale_changed", new { percent });
     }
 
     private void SaveSettings(AppSettings settings)

@@ -29,6 +29,9 @@ public sealed record DesktopPlatform
 
     public required ImmutableArray<PlatformSegment> Segments { get; init; }
 
+    /// <summary>The platform's underside, for jump collisions coming from below.</summary>
+    public ImmutableArray<PlatformSegment> CeilingSegments { get; init; } = [];
+
     public int ZOrder { get; init; }
 
     public string MonitorId { get; init; } = string.Empty;

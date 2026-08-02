@@ -8,7 +8,11 @@ internal readonly record struct CharacterPose(
     double AnimationTime,
     bool Clicked,
     double CrouchAmount,
-    Vec2 GazeTarget);
+    Vec2 GazeTarget,
+    int ClimbWallDirection = 1,
+    bool ShowShadow = false,
+    double ClimbAmount = 0,
+    int HidePeekDirection = 1);
 
 internal sealed class CharacterRenderer
 {
@@ -27,17 +31,24 @@ internal sealed class CharacterRenderer
         float height = (float)body.Height;
 
         bool running = pose.State == CharacterState.Run;
+        bool climbing = pose.State == CharacterState.Climb;
         bool locomoting = pose.State is CharacterState.Walk or CharacterState.Run;
-        double cadence = running ? 15 : 11;
-        float bobAmplitude = running ? 4.5f : 2.5f;
-        float strideAmplitude = running ? 20f : 13f;
+        float climbAmount = Math.Clamp((float)pose.ClimbAmount, 0, 1);
+        double cadence = running ? 15 : (climbing ? 7 : 11);
+        float bobAmplitude = running ? width * 0.096f : width * 0.053f;
+        float strideAmplitude = running ? width * 0.43f : width * 0.28f;
         float bob = locomoting ? (float)(Math.Sin(pose.AnimationTime * cadence) * bobAmplitude) : 0;
         float stride = locomoting ? (float)(Math.Sin(pose.AnimationTime * cadence) * strideAmplitude) : 0;
-        // Sitting, the landing impact, and standing back up all share the same
-        // knees-bent silhouette; only how CrouchAmount got to its value differs.
-        float crouch = (float)(Math.Clamp(pose.CrouchAmount, 0, 1) * 24);
+        float climbReach = climbAmount > 0.001f
+            ? (float)(Math.Sin(pose.AnimationTime * cadence) * height * 0.07 * climbAmount)
+            : 0;
 
-        using var outline = new Pen(Ink, 5)
+        // Sitting, the landing impact, and standing back up all share the same
+        // knees-bent silhouette; only how CrouchAmount got there (locked vs. decaying) differs.
+        float crouch = Math.Clamp((float)pose.CrouchAmount, 0, 1);
+
+        float outlineWidth = Math.Max(1.6f, width * 0.055f);
+        using var outline = new Pen(Ink, outlineWidth)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round,
@@ -47,65 +58,204 @@ internal sealed class CharacterRenderer
         using var whiteBrush = new SolidBrush(Color.White);
         using var shadowBrush = new SolidBrush(Color.FromArgb(48, 30, 31, 43));
 
-        graphics.FillEllipse(shadowBrush, x + 17, y + height - 8, width - 34, 10);
+        float legBottom = y + height - (height * 0.05f);
+        if (pose.ShowShadow)
+        {
+            float shadowWidth = width * (0.66f - (crouch * 0.1f));
+            graphics.FillEllipse(
+                shadowBrush,
+                x + ((width - shadowWidth) / 2),
+                legBottom - (height * 0.02f),
+                shadowWidth,
+                height * 0.05f);
+        }
+
+        if (pose.State == CharacterState.Hide)
+        {
+            // Reads as peeking around/over an edge rather than a head bolted to the corner:
+            // the head leans out toward HidePeekDirection, a small shoulder/collar sliver
+            // trails it (leaning less far, as if still mostly tucked behind), and the eyes
+            // lean a touch further still — the same layout a person leaning out to look
+            // would make. OverlayForm positions body.Y so the head clears the edge; the
+            // rest of the body is never drawn at all.
+            float peekHeadSize = width * 0.52f;
+            float lean = pose.HidePeekDirection * width * 0.16f;
+            float peekHeadX = x + ((width - peekHeadSize) / 2) + lean;
+            float peekHeadY = y + (height * 0.017f);
+
+            float shoulderWidth = width * 0.36f;
+            float shoulderHeight = height * 0.15f;
+            var peekShoulder = new RectangleF(
+                x + ((width - shoulderWidth) / 2) + (lean * 0.35f),
+                peekHeadY + (peekHeadSize * 0.8f),
+                shoulderWidth,
+                shoulderHeight);
+            graphics.FillRoundedRectangle(bodyBrush, peekShoulder, peekShoulder.Width * 0.35f);
+            graphics.DrawRoundedRectangle(outline, peekShoulder, peekShoulder.Width * 0.35f);
+
+            graphics.FillEllipse(faceBrush, peekHeadX, peekHeadY, peekHeadSize, peekHeadSize);
+            graphics.DrawEllipse(outline, peekHeadX, peekHeadY, peekHeadSize, peekHeadSize);
+
+            float peekEyeSize = peekHeadSize * 0.19f;
+            float peekEyeY = peekHeadY + (peekHeadSize * 0.44f);
+            float eyeLean = pose.HidePeekDirection * peekHeadSize * 0.06f;
+            DrawEye(
+                graphics, peekHeadX + (peekHeadSize * 0.26f) + eyeLean, peekEyeY, peekEyeSize, pose.GazeTarget, whiteBrush);
+            DrawEye(
+                graphics,
+                peekHeadX + (peekHeadSize * 0.74f) - peekEyeSize + eyeLean,
+                peekEyeY,
+                peekEyeSize,
+                pose.GazeTarget,
+                whiteBrush);
+            return;
+        }
+
+        // Crouching lowers the head/torso within the same footprint (feet stay planted)
+        // and widens the silhouette slightly, reading as a settle/impact rather than a
+        // uniform vertical shift.
+        float crouchDrop = crouch * height * 0.26f;
+        float stretch = crouch * width * 0.1f;
 
         float headSize = width * 0.52f;
         float headX = x + ((width - headSize) / 2);
-        float headY = y + 3 + bob + crouch;
+        float headY = y + (height * 0.017f) + bob + crouchDrop;
         graphics.FillEllipse(faceBrush, headX, headY, headSize, headSize);
         graphics.DrawEllipse(outline, headX, headY, headSize, headSize);
 
-        float eyeY = headY + (headSize * 0.46f);
-        DrawEye(graphics, headX + 16, eyeY, pose.GazeTarget, whiteBrush);
-        DrawEye(graphics, headX + headSize - 25, eyeY, pose.GazeTarget, whiteBrush);
+        float eyeSize = headSize * 0.19f;
+        float eyeY = headY + (headSize * 0.44f);
+        DrawEye(graphics, headX + (headSize * 0.26f), eyeY, eyeSize, pose.GazeTarget, whiteBrush);
+        DrawEye(graphics, headX + (headSize * 0.74f) - eyeSize, eyeY, eyeSize, pose.GazeTarget, whiteBrush);
 
-        float torsoTop = headY + headSize - 2;
-        var torso = new RectangleF(x + 27, torsoTop, width - 54, height * 0.34f);
-        graphics.FillRoundedRectangle(bodyBrush, torso, 14);
-        graphics.DrawRoundedRectangle(outline, torso, 14);
+        float torsoTop = headY + (headSize * 0.96f);
+        float torsoHeight = height * 0.34f;
+        var torso = new RectangleF(
+            x + (width * 0.29f) - (stretch / 2),
+            torsoTop,
+            (width * 0.42f) + stretch,
+            torsoHeight);
+        graphics.FillRoundedRectangle(bodyBrush, torso, torso.Width * 0.3f);
+        graphics.DrawRoundedRectangle(outline, torso, torso.Width * 0.3f);
 
-        float shoulderY = torsoTop + 14;
-        float hipY = torso.Bottom - 2;
-        float legBottom = y + height - 9;
+        float shoulderY = torsoTop + (height * 0.08f);
+        float hipY = torso.Bottom - (height * 0.01f);
 
         if (pose.State == CharacterState.Fall)
         {
-            graphics.DrawLine(outline, torso.Left + 4, shoulderY, x + 5, shoulderY - 22);
-            graphics.DrawLine(outline, torso.Right - 4, shoulderY, x + width - 5, shoulderY - 22);
+            graphics.DrawLine(outline, torso.Left + (width * 0.04f), shoulderY, x + (width * 0.05f), shoulderY - (height * 0.12f));
+            graphics.DrawLine(outline, torso.Right - (width * 0.04f), shoulderY, x + width - (width * 0.05f), shoulderY - (height * 0.12f));
         }
         else
         {
-            graphics.DrawLine(outline, torso.Left + 4, shoulderY, x + 10 - (stride * 0.25f), hipY - 4);
-            graphics.DrawLine(outline, torso.Right - 4, shoulderY, x + width - 10 + (stride * 0.25f), hipY - 4);
+            // Blended by ClimbAmount rather than switched on CharacterState.Climb: entering
+            // or leaving a climb cross-fades the arms from the normal swing to gripping the
+            // wall over ClimbPoseBlendSeconds instead of swapping poses on a single frame.
+            float normalHand1X = x + (width * 0.11f) - (stride * 0.25f);
+            float normalHand1Y = hipY - (height * 0.02f);
+            float normalHand2X = x + width - (width * 0.11f) + (stride * 0.25f);
+            float normalHand2Y = hipY - (height * 0.02f);
+
+            float hand1X = normalHand1X;
+            float hand1Y = normalHand1Y;
+            float hand2X = normalHand2X;
+            float hand2Y = normalHand2Y;
+
+            if (climbAmount > 0.001f)
+            {
+                // Both hands reach sideways to the wall they're actually clinging to (not
+                // symmetrically up into open air) and land on a visible grip point at its
+                // edge, so it reads as holding on rather than dangling.
+                float wallX = pose.ClimbWallDirection > 0 ? x + width + (width * 0.03f) : x - (width * 0.03f);
+                float climbHand1Y = shoulderY - (height * 0.05f) - climbReach;
+                float climbHand2Y = shoulderY + (height * 0.07f) + climbReach;
+
+                hand1X = Lerp(normalHand1X, wallX, climbAmount);
+                hand1Y = Lerp(normalHand1Y, climbHand1Y, climbAmount);
+                hand2X = Lerp(normalHand2X, wallX, climbAmount);
+                hand2Y = Lerp(normalHand2Y, climbHand2Y, climbAmount);
+
+                float handSize = width * 0.16f * climbAmount;
+                graphics.FillEllipse(faceBrush, hand1X - (handSize / 2), hand1Y - (handSize / 2), handSize, handSize);
+                graphics.DrawEllipse(outline, hand1X - (handSize / 2), hand1Y - (handSize / 2), handSize, handSize);
+                graphics.FillEllipse(faceBrush, hand2X - (handSize / 2), hand2Y - (handSize / 2), handSize, handSize);
+                graphics.DrawEllipse(outline, hand2X - (handSize / 2), hand2Y - (handSize / 2), handSize, handSize);
+            }
+
+            graphics.DrawLine(outline, torso.Left + (width * 0.04f), shoulderY, hand1X, hand1Y);
+            graphics.DrawLine(outline, torso.Right - (width * 0.04f), shoulderY, hand2X, hand2Y);
         }
 
-        graphics.DrawLine(outline, torso.Left + 14, hipY, x + 25 + stride, legBottom);
-        graphics.DrawLine(outline, torso.Right - 14, hipY, x + width - 25 - stride, legBottom);
+        DrawLeg(graphics, outline, torso.Left + (width * 0.06f), hipY, x + (width * 0.27f) + stride, legBottom, width, crouch, mirrored: false);
+        DrawLeg(graphics, outline, torso.Right - (width * 0.06f), hipY, x + width - (width * 0.27f) - stride, legBottom, width, crouch, mirrored: true);
 
         if (pose.State == CharacterState.HeldByMouse)
         {
-            using var heldBrush = new SolidBrush(Color.FromArgb(220, 255, 255, 255));
-            graphics.FillEllipse(heldBrush, x + width - 24, y - 4, 24, 24);
-            graphics.DrawEllipse(outline, x + width - 24, y - 4, 24, 24);
+            float bubbleSize = width * 0.34f;
+            using var heldBrush = new SolidBrush(Color.FromArgb(215, 255, 255, 255));
+            float bubbleX = x + width + (width * 0.02f);
+            float bubbleY = y - (bubbleSize * 0.35f);
+            graphics.FillEllipse(heldBrush, bubbleX, bubbleY, bubbleSize, bubbleSize);
+            graphics.DrawEllipse(outline, bubbleX, bubbleY, bubbleSize, bubbleSize);
         }
     }
 
-    private static void DrawEye(Graphics graphics, float socketX, float socketY, Vec2 gazeTarget, Brush whiteBrush)
+    private static void DrawLeg(
+        Graphics graphics,
+        Pen outline,
+        float hipX,
+        float hipY,
+        float footX,
+        float footBottom,
+        float width,
+        float crouch,
+        bool mirrored)
     {
-        graphics.FillEllipse(whiteBrush, socketX, socketY, 9, 9);
+        if (crouch < 0.02f)
+        {
+            graphics.DrawLine(outline, hipX, hipY, footX, footBottom);
+            return;
+        }
 
-        const double pupilRange = 2.2;
-        var eyeCenter = new Vec2(socketX + 4.5, socketY + 4.5);
+        // A knee pushed out to the side and down — clearly below and away from the
+        // hip — reads as "bent leg" far more clearly than a shortened straight line.
+        float direction = mirrored ? 1 : -1;
+        float legSpan = footBottom - hipY;
+        float kneeX = hipX + (direction * width * 0.36f * crouch);
+        float kneeY = hipY + (legSpan * 0.34f * crouch);
+        float straightFootX = footX;
+        float crouchedFootX = hipX + (direction * width * 0.1f);
+        float blendedFootX = straightFootX + ((crouchedFootX - straightFootX) * crouch);
+
+        graphics.DrawLine(outline, hipX, hipY, kneeX, kneeY);
+        graphics.DrawLine(outline, kneeX, kneeY, blendedFootX, footBottom);
+    }
+
+    private static float Lerp(float a, float b, float t) => a + ((b - a) * t);
+
+    private static void DrawEye(
+        Graphics graphics,
+        float socketX,
+        float socketY,
+        float socketSize,
+        Vec2 gazeTarget,
+        Brush whiteBrush)
+    {
+        graphics.FillEllipse(whiteBrush, socketX, socketY, socketSize, socketSize);
+
+        double pupilRange = socketSize * 0.24;
+        var eyeCenter = new Vec2(socketX + (socketSize / 2), socketY + (socketSize / 2));
         Vec2 toTarget = gazeTarget - eyeCenter;
         double distance = toTarget.Length;
         Vec2 pupilOffset = distance > 0.01 ? toTarget * (Math.Min(pupilRange, distance) / distance) : Vec2.Zero;
 
+        float pupilSize = socketSize * 0.55f;
         graphics.FillEllipse(
             Brushes.Black,
-            (float)(socketX + 3 + pupilOffset.X),
-            (float)(socketY + 2 + pupilOffset.Y),
-            5,
-            5);
+            (float)(socketX + ((socketSize - pupilSize) / 2) + pupilOffset.X),
+            (float)(socketY + ((socketSize - pupilSize) / 2) + pupilOffset.Y),
+            pupilSize,
+            pupilSize);
     }
 }
 
@@ -143,4 +293,3 @@ internal static class GraphicsExtensions
         return path;
     }
 }
-

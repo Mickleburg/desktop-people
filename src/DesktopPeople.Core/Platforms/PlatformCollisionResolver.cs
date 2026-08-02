@@ -44,6 +44,42 @@ public sealed class PlatformCollisionResolver
         return closest;
     }
 
+    /// <summary>Mirror of <see cref="ResolveDownward"/> for a jump's rising phase: bonks
+    /// the character against the underside of a platform instead of landing on top.</summary>
+    public PlatformCollision? ResolveUpward(
+        RectD previousBounds,
+        RectD currentBounds,
+        double verticalVelocity,
+        IReadOnlyList<DesktopPlatform> platforms)
+    {
+        if (verticalVelocity >= 0 || currentBounds.Y > previousBounds.Y)
+        {
+            return null;
+        }
+
+        (double headLeft, double headRight) = GetFootInterval(currentBounds);
+        PlatformCollision? closest = null;
+        foreach (DesktopPlatform platform in platforms)
+        {
+            foreach (PlatformSegment segment in platform.CeilingSegments)
+            {
+                if (segment.SurfaceY < currentBounds.Y - 0.01 ||
+                    segment.SurfaceY > previousBounds.Y + 0.01 ||
+                    !segment.Intersects(headLeft, headRight))
+                {
+                    continue;
+                }
+
+                if (closest is null || segment.SurfaceY > closest.Value.Segment.SurfaceY)
+                {
+                    closest = new PlatformCollision(platform, segment);
+                }
+            }
+        }
+
+        return closest;
+    }
+
     public (double Left, double Right) GetFootInterval(RectD bounds)
     {
         double footWidth = bounds.Width * _footWidthRatio;
