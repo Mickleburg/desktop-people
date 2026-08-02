@@ -408,6 +408,7 @@ internal sealed class OverlayForm : Form
             Segments = [new PlatformSegment(left, right, floor)],
             ZOrder = int.MaxValue,
             MonitorId = "work-area",
+            MonitorTop = GetCurrentMonitorTop(),
             UpdatedAt = DateTimeOffset.UtcNow,
         };
     }
@@ -460,15 +461,19 @@ internal sealed class OverlayForm : Form
 
     private (double Floor, double Left, double Right) GetCurrentWorkArea()
     {
-        Point characterCenter = new(
-            Bounds.Left + (int)(_physics.Position.X + (_physics.Size.Width / 2)),
-            Bounds.Top + (int)(_physics.Position.Y + (_physics.Size.Height / 2)));
-        Rectangle workArea = Screen.FromPoint(characterCenter).WorkingArea;
+        Rectangle workArea = Screen.FromPoint(CharacterCenter()).WorkingArea;
         return (
             workArea.Bottom - Bounds.Top,
             workArea.Left - Bounds.Left,
             workArea.Right - Bounds.Left);
     }
+
+    private double GetCurrentMonitorTop() =>
+        Screen.FromPoint(CharacterCenter()).Bounds.Top - Bounds.Top;
+
+    private Point CharacterCenter() => new(
+        Bounds.Left + (int)(_physics.Position.X + (_physics.Size.Width / 2)),
+        Bounds.Top + (int)(_physics.Position.Y + (_physics.Size.Height / 2)));
 
     private void PositionAtPrimaryScreen()
     {

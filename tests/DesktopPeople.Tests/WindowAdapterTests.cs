@@ -22,6 +22,7 @@ internal static class WindowAdapterTests
         new("window hide event removes platform", HideRemovesPlatform),
         new("event sequence create move minimize destroy is stable", EventSequenceIsStable),
         new("periodic reconciliation recovers missed events", ReconciliationRecoversMissedEvent),
+        new("foreground change re-occludes platforms immediately", ForegroundChangeForcesImmediateReconciliation),
     ];
 
     private static void InvalidHandleIgnored()
@@ -168,6 +169,27 @@ internal static class WindowAdapterTests
         provider.Pump(start.AddSeconds(6), OverlayBounds, VirtualBounds);
         AssertEx.Equal(1, provider.Snapshot.Platforms.Length);
         AssertEx.Equal(2, api.EnumerationCount);
+    }
+
+    private static void ForegroundChangeForcesImmediateReconciliation()
+    {
+        var api = new FakeWindowApi();
+        api.Add(Window(20, new RectD(150, 250, 200, 150)));
+        api.Add(Window(10, new RectD(100, 200, 800, 600)));
+        using WindowsWindowPlatformProvider provider = Provider(
+            api,
+            out InMemoryWindowEventQueue queue,
+            TimeSpan.FromSeconds(5));
+        provider.Start(OverlayBounds, VirtualBounds);
+        AssertEx.Equal(1, api.EnumerationCount);
+        AssertEx.True(provider.Snapshot.Platforms.Any(platform => platform.ExternalHandle == 20));
+
+        api.BringToFront(10);
+        queue.Enqueue(Event(10, WindowChangeKind.ForegroundChanged));
+        provider.Pump(DateTimeOffset.UtcNow, OverlayBounds, VirtualBounds);
+
+        AssertEx.Equal(2, api.EnumerationCount);
+        AssertEx.False(provider.Snapshot.Platforms.Any(platform => platform.ExternalHandle == 20));
     }
 
     private static WindowsWindowPlatformProvider Provider(

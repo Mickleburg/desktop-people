@@ -41,7 +41,17 @@ public sealed class CharacterPlatformAttachment
             return false;
         }
 
-        double footCenter = platform.Bounds.X + RelativeFootCenterX;
+        // A resize (width change) must not drag the character along with the moving
+        // edge: only a translate (same width, different X) carries it. Otherwise
+        // shrinking a window from the left would ferry the character inward instead
+        // of leaving it in place to fall once the edge passes under its feet.
+        double footCenter = LastPlatformBounds.X + RelativeFootCenterX;
+        bool isTranslate = Math.Abs(platform.Bounds.Width - LastPlatformBounds.Width) < 0.01;
+        if (isTranslate)
+        {
+            footCenter += platform.Bounds.X - LastPlatformBounds.X;
+        }
+
         double x = footCenter - (characterBounds.Width / 2);
         RectD horizontalCandidate = new(x, characterBounds.Y, characterBounds.Width, characterBounds.Height);
         PlatformSegment? segment = FindSupportingSegment(platform, horizontalCandidate);
@@ -52,6 +62,7 @@ public sealed class CharacterPlatformAttachment
 
         double y = segment.Value.SurfaceY - characterBounds.Height - VerticalOffset;
         targetPosition = new Vec2(x, y);
+        RelativeFootCenterX = footCenter - platform.Bounds.X;
         LastPlatformBounds = platform.Bounds;
         return true;
     }
@@ -86,7 +97,8 @@ public sealed class CharacterPlatformAttachment
         double right = center + (footWidth / 2);
         foreach (PlatformSegment segment in platform.Segments)
         {
-            if (segment.Intersects(left, right))
+            if (segment.Intersects(left, right) &&
+                segment.SurfaceY - characterBounds.Height >= platform.MonitorTop)
             {
                 return segment;
             }

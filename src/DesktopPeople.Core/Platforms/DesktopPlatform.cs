@@ -33,6 +33,9 @@ public sealed record DesktopPlatform
 
     public string MonitorId { get; init; } = string.Empty;
 
+    /// <summary>Overlay-space Y above which the character's head would leave the physical monitor.</summary>
+    public double MonitorTop { get; init; } = double.NegativeInfinity;
+
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

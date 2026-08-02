@@ -14,6 +14,7 @@ public sealed record WindowCandidate
     public string ClassName { get; init; } = string.Empty;
     public int ZOrder { get; init; }
     public string MonitorId { get; init; } = string.Empty;
+    public double MonitorTop { get; init; } = double.NegativeInfinity;
 }
 
 public enum WindowExclusionReason

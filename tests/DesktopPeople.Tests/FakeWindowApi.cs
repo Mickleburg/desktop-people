@@ -31,6 +31,12 @@ internal sealed class FakeWindowApi : IWindowApi
         _zOrder.Remove(handle);
     }
 
+    public void BringToFront(long handle)
+    {
+        _zOrder.Remove(handle);
+        _zOrder.Insert(0, handle);
+    }
+
     public IReadOnlyList<nint> EnumerateWindows()
     {
         EnumerationCount++;
@@ -74,6 +80,8 @@ internal sealed class FakeWindowApi : IWindowApi
     public string GetClassName(nint handle) => Get(handle.ToInt64()).ClassName;
 
     public string GetMonitorId(nint handle) => Get(handle.ToInt64()).MonitorId;
+
+    public double GetMonitorTop(nint handle) => Get(handle.ToInt64()).MonitorTop;
 }
 
 internal sealed class FakeWindowData
@@ -99,6 +107,8 @@ internal sealed class FakeWindowData
     public string ClassName { get; set; } = "Notepad";
 
     public string MonitorId { get; set; } = "monitor:1";
+
+    public double MonitorTop { get; set; } = double.NegativeInfinity;
 
     public bool ThrowOnRead { get; set; }
 }

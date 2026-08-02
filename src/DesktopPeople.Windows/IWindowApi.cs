@@ -25,4 +25,6 @@ public interface IWindowApi
     string GetClassName(nint handle);
 
     string GetMonitorId(nint handle);
+
+    double GetMonitorTop(nint handle);
 }

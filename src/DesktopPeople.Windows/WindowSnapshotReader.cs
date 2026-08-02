@@ -63,6 +63,7 @@ public sealed class WindowSnapshotReader
                 ClassName = _api.GetClassName(handle),
                 ZOrder = zOrder,
                 MonitorId = _api.GetMonitorId(handle),
+                MonitorTop = _api.GetMonitorTop(handle),
             };
         }
         catch (Exception exception) when (IsRecoverable(exception))

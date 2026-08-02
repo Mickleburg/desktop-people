@@ -13,6 +13,7 @@ public enum WindowChangeKind
     MoveSizeEnd,
     MinimizeStart,
     MinimizeEnd,
+    ForegroundChanged,
 }
 
 public readonly record struct WindowChangeEvent(

@@ -5,6 +5,7 @@ namespace DesktopPeople.Windows;
 
 public sealed class Win32WindowEventSource : IWindowEventQueue
 {
+    private const uint EventSystemForeground = 0x0003;
     private const uint EventSystemMoveSizeStart = 0x000A;
     private const uint EventSystemMoveSizeEnd = 0x000B;
     private const uint EventSystemMinimizeStart = 0x0016;
@@ -26,6 +27,7 @@ public sealed class Win32WindowEventSource : IWindowEventQueue
     public Win32WindowEventSource()
     {
         _callback = OnWindowEvent;
+        AddHook(EventSystemForeground, EventSystemForeground);
         AddHook(EventSystemMoveSizeStart, EventSystemMoveSizeEnd);
         AddHook(EventSystemMinimizeStart, EventSystemMinimizeEnd);
         AddHook(EventObjectCreate, EventObjectLocationChange);
@@ -86,6 +88,7 @@ public sealed class Win32WindowEventSource : IWindowEventQueue
 
         WindowChangeKind? kind = eventType switch
         {
+            EventSystemForeground => WindowChangeKind.ForegroundChanged,
             EventSystemMoveSizeStart => WindowChangeKind.MoveSizeStart,
             EventSystemMoveSizeEnd => WindowChangeKind.MoveSizeEnd,
             EventSystemMinimizeStart => WindowChangeKind.MinimizeStart,

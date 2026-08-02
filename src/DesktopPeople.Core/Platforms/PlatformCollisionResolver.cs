@@ -28,7 +28,8 @@ public sealed class PlatformCollisionResolver
             {
                 if (segment.SurfaceY < previousBounds.Bottom - 0.01 ||
                     segment.SurfaceY > currentBounds.Bottom + 0.01 ||
-                    !segment.Intersects(footLeft, footRight))
+                    !segment.Intersects(footLeft, footRight) ||
+                    segment.SurfaceY - currentBounds.Height < platform.MonitorTop)
                 {
                     continue;
                 }

@@ -80,6 +80,20 @@ public sealed class Win32WindowApi : IWindowApi
             : string.Empty;
     }
 
+    public double GetMonitorTop(nint handle)
+    {
+        nint monitor = NativeMethods.MonitorFromWindow(handle, MonitorDefaultToNearest);
+        if (monitor == 0)
+        {
+            return double.NegativeInfinity;
+        }
+
+        var info = new NativeMonitorInfo { Size = Marshal.SizeOf<NativeMonitorInfo>() };
+        return NativeMethods.GetMonitorInfo(monitor, ref info)
+            ? info.Monitor.Top
+            : double.NegativeInfinity;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect
     {

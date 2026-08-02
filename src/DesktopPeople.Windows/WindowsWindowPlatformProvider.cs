@@ -76,14 +76,23 @@ public sealed class WindowsWindowPlatformProvider : IWindowPlatformProvider
         _virtualScreenBounds = virtualScreenBounds;
 
         bool changed = coordinateSpaceChanged;
+        bool zOrderMayHaveChanged = false;
         int processedEvents = 0;
         while (processedEvents < MaximumEventsPerPump && _events.TryDequeue(out WindowChangeEvent windowEvent))
         {
-            changed |= ApplyEvent(windowEvent);
+            if (windowEvent.Kind == WindowChangeKind.ForegroundChanged)
+            {
+                zOrderMayHaveChanged = true;
+            }
+            else
+            {
+                changed |= ApplyEvent(windowEvent);
+            }
+
             processedEvents++;
         }
 
-        if (now - _lastReconciliation >= _reconciliationInterval)
+        if (zOrderMayHaveChanged || now - _lastReconciliation >= _reconciliationInterval)
         {
             Reconcile(now);
             return;
@@ -201,6 +210,7 @@ public sealed class WindowsWindowPlatformProvider : IWindowPlatformProvider
                 Segments = [new PlatformSegment(bounds.X, bounds.Right, surfaceY)],
                 ZOrder = candidate.ZOrder,
                 MonitorId = candidate.MonitorId,
+                MonitorTop = candidate.MonitorTop - _overlayScreenBounds.Y,
                 UpdatedAt = now,
             });
         }

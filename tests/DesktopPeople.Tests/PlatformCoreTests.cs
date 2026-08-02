@@ -24,11 +24,15 @@ internal static class PlatformCoreTests
         new("upward character does not land", CollisionIgnoresUpwardMotion),
         new("swept collision prevents tunnelling", SweptCollision),
         new("nearest crossed platform wins", NearestPlatformWins),
+        new("landing without monitor headroom is rejected", CollisionRejectsSegmentWithoutHeadroom),
         new("attachment stores the relative foot position", AttachmentStoresRelativePosition),
+        new("support without monitor headroom is rejected", AttachmentRejectsSegmentWithoutHeadroom),
         new("moving platform moves the attached character", AttachmentFollowsMovement),
         new("removed platform changes state to fall", RemovedPlatformCausesFall),
         new("shrinking platform causes fall when support disappears", ResizeCanRemoveSupport),
         new("shrinking platform keeps attachment when support remains", ResizeCanKeepSupport),
+        new("resizing from the left edge does not drag the character", ResizeFromLeftEdgeKeepsAbsolutePosition),
+        new("left edge passing under the character causes fall", ResizeFromLeftEdgePastCharacterCausesFall),
         new("occlusion policy exposes only visible top segments", OcclusionSplitsSegments),
     ];
 
@@ -129,6 +133,26 @@ internal static class PlatformCoreTests
         AssertEx.Equal("upper", collision!.Value.Platform.Id);
     }
 
+    private static void CollisionRejectsSegmentWithoutHeadroom()
+    {
+        var resolver = new PlatformCollisionResolver();
+        DesktopPlatform platform = Platform("window:1", 0, 150, 300) with { MonitorTop = 150 };
+        PlatformCollision? collision = resolver.ResolveDownward(
+            new RectD(100, 50, 40, 50),
+            new RectD(100, 120, 40, 50),
+            500,
+            [platform]);
+        AssertEx.True(collision is null);
+    }
+
+    private static void AttachmentRejectsSegmentWithoutHeadroom()
+    {
+        var attachment = new CharacterPlatformAttachment();
+        DesktopPlatform platform = Platform("window:1", 100, 200, 200) with { MonitorTop = 200 };
+        PlatformSegment? segment = attachment.FindSupportingSegment(platform, new RectD(140, 110, 20, 40));
+        AssertEx.True(segment is null);
+    }
+
     private static void AttachmentStoresRelativePosition()
     {
         var attachment = new CharacterPlatformAttachment();
@@ -189,6 +213,31 @@ internal static class PlatformCoreTests
             character,
             out Vec2 target));
         AssertEx.Equal(new Vec2(170, 160), target);
+    }
+
+    private static void ResizeFromLeftEdgeKeepsAbsolutePosition()
+    {
+        var attachment = new CharacterPlatformAttachment();
+        RectD character = new(140, 160, 20, 40);
+        attachment.Attach(Platform("window:1", 100, 200, 200), character);
+        bool followed = attachment.TryFollow(
+            Platform("window:1", 130, 200, 170),
+            character,
+            out Vec2 target);
+        AssertEx.True(followed);
+        AssertEx.Equal(new Vec2(140, 160), target);
+    }
+
+    private static void ResizeFromLeftEdgePastCharacterCausesFall()
+    {
+        var attachment = new CharacterPlatformAttachment();
+        RectD character = new(140, 160, 20, 40);
+        attachment.Attach(Platform("window:1", 100, 200, 200), character);
+        bool followed = attachment.TryFollow(
+            Platform("window:1", 160, 200, 140),
+            character,
+            out _);
+        AssertEx.False(followed);
     }
 
     private static void OcclusionSplitsSegments()
