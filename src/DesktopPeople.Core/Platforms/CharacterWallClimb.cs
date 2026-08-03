@@ -39,19 +39,19 @@ public sealed class CharacterWallClimb
 
     public WallSide Side { get; private set; }
 
-    public void Start(DesktopPlatform platform, WallSide side, Size2 characterSize)
+    public void Start(DesktopPlatform platform, WallSide side, Size2 characterSize, RectD? screenBounds = null)
     {
         IsClimbing = true;
         PlatformId = platform.Id;
         Side = side;
-        Retarget(platform, characterSize);
+        Retarget(platform, characterSize, screenBounds);
     }
 
     /// <summary>Re-syncs the clung-to wall's geometry to the platform's current bounds —
     /// callers should invoke this every frame a climb is in progress (not just at Start),
     /// otherwise a window dragged or resized mid-climb leaves the character clinging to
     /// wherever the window used to be instead of where it actually is now.</summary>
-    public void Retarget(DesktopPlatform platform, Size2 characterSize)
+    public void Retarget(DesktopPlatform platform, Size2 characterSize, RectD? screenBounds = null)
     {
         _wallX = Side == WallSide.Left
             ? platform.Bounds.X - characterSize.Width
@@ -61,6 +61,31 @@ public sealed class CharacterWallClimb
             : platform.Bounds.Right - characterSize.Width;
         _topY = platform.Segments[0].SurfaceY - characterSize.Height;
         _bottomY = platform.Bounds.Bottom - characterSize.Height;
+
+        if (screenBounds is { } bounds)
+        {
+            // A window's real geometry can hang off the side or bottom of the monitor
+            // (dragged mostly past the edge of the display) — without this, clinging to
+            // that edge let the character climb out into that off-screen space with
+            // nothing to stop it, only to snap back the instant grounded physics resumed
+            // and re-clamped it on-screen. The wall/ledge X and the bottom of the climb are
+            // never allowed past the visible screen, regardless of where the real window
+            // geometry actually extends to.
+            double minX = bounds.X;
+            double maxX = bounds.Right - characterSize.Width;
+            if (maxX >= minX)
+            {
+                _wallX = Math.Clamp(_wallX, minX, maxX);
+                _ledgeX = Math.Clamp(_ledgeX, minX, maxX);
+            }
+
+            _topY = Math.Max(_topY, bounds.Y);
+            double maxBottomY = bounds.Bottom - characterSize.Height;
+            if (maxBottomY >= _topY)
+            {
+                _bottomY = Math.Min(_bottomY, maxBottomY);
+            }
+        }
     }
 
     public void Stop()

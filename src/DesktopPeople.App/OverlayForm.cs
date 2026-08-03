@@ -28,6 +28,8 @@ internal sealed class OverlayForm : Form
     private const double HideLowerOffset = 0.14;
     private const double HideGrabOnMoveChance = 0.25;
     private const double ClimbPoseBlendSeconds = 0.22;
+    private const double HidePoseBlendSeconds = 0.28;
+    private const double PlatformMissingGraceSeconds = 0.4;
     private const double CoveredHopSpeed = 220;
     private const double MinCharacterScale = 0.7;
     private const double MaxCharacterScale = 1.6;
@@ -83,6 +85,11 @@ internal sealed class OverlayForm : Form
     private string? _hidingPlatformId;
     private RectD _hidingStartBounds;
     private WallSide _hidingSide;
+    private double _hideAmount;
+    private Vec2 _hideEntryPosition;
+    private double _climbPlatformMissingSeconds;
+    private double _hidingPlatformMissingSeconds;
+    private bool _pressedAgainstWall;
 
     public OverlayForm(
         JsonLineLogger logger,
@@ -275,9 +282,24 @@ internal sealed class OverlayForm : Form
             }
         }
 
+        // While easing into Hide, the physics position has already jumped straight to the
+        // final tucked spot (needed for hit-testing/collision to be consistent right away)
+        // — only the paint position slides from where it was standing when hide was
+        // triggered, over HidePoseBlendSeconds, so the character visibly walks/settles
+        // into the corner instead of teleporting there on the first Hide frame.
+        RectD renderBody = _physics.Bounds;
+        if (_stateMachine.Current == CharacterState.Hide && _hideAmount < 1)
+        {
+            renderBody = new RectD(
+                _hideEntryPosition.X + ((_physics.Position.X - _hideEntryPosition.X) * _hideAmount),
+                _hideEntryPosition.Y + ((_physics.Position.Y - _hideEntryPosition.Y) * _hideAmount),
+                _physics.Size.Width,
+                _physics.Size.Height);
+        }
+
         _renderer.Draw(
             e.Graphics,
-            _physics.Bounds,
+            renderBody,
             new CharacterPose(
                 _stateMachine.Current,
                 _animationTime,
@@ -287,7 +309,8 @@ internal sealed class OverlayForm : Form
                 climbWallDirection,
                 ShowShadow: _showPlatformDebug,
                 ClimbAmount: _climbAmount,
-                HidePeekDirection: hidePeekDirection));
+                HidePeekDirection: hidePeekDirection,
+                HideAmount: _hideAmount));
 
         if (previousClip is not null)
         {
@@ -424,6 +447,7 @@ internal sealed class OverlayForm : Form
             _secondsSinceInteraction += delta;
             UpdateCrouchAmount(delta);
             UpdateClimbAmount(delta);
+            UpdateHideAmount(delta);
             UpdateCursorEnergy(delta, pointerOverlay);
 
             Vec2 characterCenter = new(
@@ -443,13 +467,14 @@ internal sealed class OverlayForm : Form
             }
             else if (_stateMachine.Current == CharacterState.Hide)
             {
-                UpdateHiding(snapshot);
+                UpdateHiding(delta, snapshot);
             }
             else
             {
                 UpdateGroundedPhysics(delta, snapshot);
             }
 
+            RecoverFromInvalidPhysicsState();
             UpdateAutonomousBehavior();
             if (_clicked && _stateTime > 0.45)
             {
@@ -461,6 +486,53 @@ internal sealed class OverlayForm : Form
         Invalidate();
     }
 
+    /// <summary>Every position-mutating path on <see cref="CharacterPhysics"/> other than
+    /// <see cref="CharacterPhysics.SetPosition"/> (climbing, landing, hard-floor recovery,
+    /// rescaling, ...) writes straight through without validating — a bad read somewhere
+    /// upstream (e.g. degenerate window geometry mid-resize/close) can turn into a NaN or
+    /// astronomically large position that never throws on its own, but GDI+ does the moment
+    /// it's asked to draw an ellipse at those coordinates — and it does so every single
+    /// frame, with nothing to ever recover, since the underlying bad position just sits
+    /// there. The overlay is borderless, click-through and not in the taskbar, so that reads
+    /// as a permanently stuck, unclosable window (confirmed in a real crash log: a
+    /// `Graphics.DrawEllipse` "generic error" repeating from <see cref="CharacterRenderer"/>
+    /// with no recovery in between). Catching it here, right before the paint that would
+    /// otherwise crash, and snapping back to a safe on-screen spot is the same "one absolute
+    /// boundary" recovery already used for falling past the floor.</summary>
+    private void RecoverFromInvalidPhysicsState()
+    {
+        (_, RectD virtualBounds) = GetCoordinateSpace();
+        if (IsPositionSane(_physics.Position, virtualBounds))
+        {
+            return;
+        }
+
+        Vec2 badPosition = _physics.Position;
+        _wallClimb.Stop();
+        _attachment.Detach();
+        _currentPlatformId = null;
+        _hidingPlatformId = null;
+        PositionAtPrimaryScreen();
+        _stateMachine.Send(CharacterSignal.SupportLost);
+        _logger.Write("character_position_recovered", new { bad_position = badPosition.ToString() });
+    }
+
+    private static bool IsPositionSane(Vec2 position, RectD virtualBounds)
+    {
+        if (!double.IsFinite(position.X) || !double.IsFinite(position.Y))
+        {
+            return false;
+        }
+
+        // Generous margin beyond the actual virtual screen — legitimate motion (a big
+        // throw, climbing off toward a monitor edge) never needs more than a screen's worth
+        // of slack, so anything beyond that is corrupted state, not a character that's
+        // merely off-screen for a moment.
+        double margin = Math.Max(virtualBounds.Width, virtualBounds.Height) + 5_000;
+        return position.X >= virtualBounds.X - margin && position.X <= virtualBounds.Right + margin
+            && position.Y >= virtualBounds.Y - margin && position.Y <= virtualBounds.Bottom + margin;
+    }
+
     private void UpdateGroundedPhysics(double delta, PlatformSnapshot snapshot)
     {
         DesktopPlatform? attachedPlatform = FollowAttachedPlatform(snapshot);
@@ -469,6 +541,15 @@ internal sealed class OverlayForm : Form
         CharacterMotionStep motion = _physics.Integrate(delta, _stateMachine.Current, left, right);
         _previousBottom = motion.PreviousBounds.Bottom;
         _currentBottom = motion.CurrentBounds.Bottom;
+
+        // Read by UpdateFleeBehavior (one frame later — an imperceptible lag) to suppress
+        // its own independent jump roll while the wall-encounter reaction below is already
+        // deciding what to do about the exact same wall. Without this, a fleeing character
+        // pressed against a wall it's about to climb could also roll a flee-jump on any of
+        // the several frames it takes HandleWallEncounter's own roll to succeed, bouncing it
+        // into a little hop-and-immediately-land loop right at the wall before climbing
+        // actually starts.
+        _pressedAgainstWall = motion.HitHorizontalEdge && (leftWall is not null || rightWall is not null);
 
         if (_stateMachine.Current == CharacterState.Fall)
         {
@@ -535,6 +616,26 @@ internal sealed class OverlayForm : Form
                 });
                 _stateMachine.Send(CharacterSignal.Landed);
             }
+            else
+            {
+                // ResolveDownward only catches a continuous downward sweep crossing a
+                // surface — if the character is already past the desktop floor at the very
+                // start of a fall (e.g. having climbed down past a window that extends
+                // below the work area, or some other edge case placing it there directly),
+                // the sweep never "crosses" it and gravity would otherwise pull it further
+                // away every frame with nothing to ever catch it, off the bottom of the
+                // screen for good. The desktop floor is the one absolute boundary, so
+                // treat already being past it as an instant landing too.
+                double floorY = CreateDesktopPlatform().Segments[0].SurfaceY;
+                if (motion.CurrentBounds.Bottom >= floorY)
+                {
+                    _physics.LandOn(floorY);
+                    _currentPlatformId = "desktop:work-area";
+                    _attachment.Detach();
+                    _logger.Write("character_hard_floor_recovery", new { floor_y = floorY });
+                    _stateMachine.Send(CharacterSignal.Landed);
+                }
+            }
         }
         else
         {
@@ -596,8 +697,9 @@ internal sealed class OverlayForm : Form
 
     private void StartClimb(DesktopPlatform platform, WallSide side, double initialDirection = 1)
     {
-        _wallClimb.Start(platform, side, _physics.Size);
+        _wallClimb.Start(platform, side, _physics.Size, GetCurrentScreenBounds());
         _climbDirection = initialDirection;
+        _climbPlatformMissingSeconds = 0;
         _attachment.Detach();
         _currentPlatformId = null;
         _stateMachine.Send(CharacterSignal.ClimbRequested);
@@ -637,6 +739,12 @@ internal sealed class OverlayForm : Form
         // already standing — a little lower still (HideLowerOffset), not up at the wall's
         // own top corner — so the peek reads at roughly natural head height next to the
         // wall, the way a person actually crouched slightly to peek around a corner would.
+        // Captured before the position snaps to the tucked spot below — OnPaint blends the
+        // *rendered* position from here up to the real (already-updated) physics position
+        // over HidePoseBlendSeconds, so the character visibly settles into the corner
+        // instead of teleporting there on the first Hide frame.
+        _hideEntryPosition = _physics.Position;
+
         double bodyX = side == WallSide.Left
             ? wall.Bounds.X - (_physics.Size.Width * 0.5)
             : wall.Bounds.Right - (_physics.Size.Width * 0.5);
@@ -645,21 +753,35 @@ internal sealed class OverlayForm : Form
         _hidingPlatformId = wall.Id;
         _hidingStartBounds = wall.Bounds;
         _hidingSide = side;
+        _hideAmount = 0;
+        _hidingPlatformMissingSeconds = 0;
         _attachment.Detach();
         _currentPlatformId = null;
         _stateMachine.Send(CharacterSignal.HideRequested);
         _logger.Write("character_hiding", new { wall = wall.Id, side = side.ToString() });
     }
 
-    private void UpdateHiding(PlatformSnapshot snapshot)
+    private void UpdateHiding(double delta, PlatformSnapshot snapshot)
     {
         DesktopPlatform? wall = snapshot.Platforms.FirstOrDefault(p => p.Id == _hidingPlatformId);
         if (wall is null)
         {
+            _hidingPlatformMissingSeconds += delta;
+            if (_hidingPlatformMissingSeconds < PlatformMissingGraceSeconds)
+            {
+                // The wall being hidden behind can vanish from a single snapshot when
+                // something briefly covers it full-screen (e.g. the screenshot/snip flash,
+                // or a reconciliation racing a toast notification) — that's not the window
+                // actually closing, so ride out a short grace window in place instead of
+                // dropping out of hiding over one bad frame.
+                return;
+            }
+
             _stateMachine.Send(CharacterSignal.SupportLost);
             return;
         }
 
+        _hidingPlatformMissingSeconds = 0;
         bool moved = Math.Abs(wall.Bounds.X - _hidingStartBounds.X) > HideMoveTolerance ||
             Math.Abs(wall.Bounds.Y - _hidingStartBounds.Y) > HideMoveTolerance;
         if (!moved)
@@ -682,14 +804,30 @@ internal sealed class OverlayForm : Form
         DesktopPlatform? platform = ResolveClimbPlatform(snapshot);
         if (platform is null)
         {
+            _climbPlatformMissingSeconds += delta;
+            if (_climbPlatformMissingSeconds < PlatformMissingGraceSeconds)
+            {
+                // The climbed window can vanish from a single snapshot when something
+                // briefly covers it full-screen (e.g. the screenshot/snip flash animation,
+                // or a reconciliation racing a toast notification) — that's not the window
+                // actually closing, so ride out a short grace window holding position
+                // instead of dropping the climb over one bad frame.
+                return;
+            }
+
             _wallClimb.Stop();
             _stateMachine.Send(CharacterSignal.SupportLost);
             return;
         }
 
+        _climbPlatformMissingSeconds = 0;
+
         // Re-sync every frame, not just once at Start(): otherwise a window dragged or
-        // resized mid-climb leaves the character clinging to wherever it used to be.
-        _wallClimb.Retarget(platform, _physics.Size);
+        // resized mid-climb leaves the character clinging to wherever it used to be. The
+        // screen bounds are passed every time too, since the character can drift toward a
+        // different monitor mid-climb (e.g. a push-off) and the clamp should always follow
+        // whichever monitor it's actually next to.
+        _wallClimb.Retarget(platform, _physics.Size, GetCurrentScreenBounds());
 
         double roll = Random.Shared.NextDouble();
         if (roll < ClimbLetGoChancePerSecond * delta)
@@ -854,7 +992,11 @@ internal sealed class OverlayForm : Form
         if (_stateMachine.Current is CharacterState.Run or CharacterState.Walk)
         {
             _physics.FaceDirection(characterCenter.X >= pointerOverlay.X ? 1 : -1);
-            if (Random.Shared.NextDouble() < FleeJumpChancePerSecond * delta)
+            // Pressed against a wall, HandleWallEncounter is already rolling its own
+            // climb/hide/stop reaction every frame — an independent jump attempt on top of
+            // that just produces a little hop-and-immediately-land right at the wall,
+            // possibly several times in a row before the wall reaction finally resolves.
+            if (!_pressedAgainstWall && Random.Shared.NextDouble() < FleeJumpChancePerSecond * delta)
             {
                 TryJump();
             }
@@ -904,11 +1046,37 @@ internal sealed class OverlayForm : Form
     /// or leaving a climb cross-fades the limbs instead of swapping poses on a single frame.</summary>
     private void UpdateClimbAmount(double delta)
     {
+        if (_stateMachine.Current is CharacterState.Walk or CharacterState.Run)
+        {
+            // Once the character is actively walking/running again (e.g. it lands off a
+            // climb and immediately resumes fleeing), the stride animation takes over the
+            // arms on its own — continuing the usual ClimbPoseBlendSeconds fade-out at the
+            // same time would have the arms blending toward a now-stale climbWallLineX
+            // while the stride's own oscillation is simultaneously swinging them for
+            // walking, the two fighting over the same arm position for the whole fade and
+            // reading as the arms twitching/pawing at the air where the wall used to be.
+            // Idle keeps the graceful fade (nothing else is competing for the arms there).
+            _climbAmount = 0;
+            return;
+        }
+
         double target = _stateMachine.Current == CharacterState.Climb ? 1 : 0;
         double step = delta / ClimbPoseBlendSeconds;
         _climbAmount = target > _climbAmount
             ? Math.Min(target, _climbAmount + step)
             : Math.Max(target, _climbAmount - step);
+    }
+
+    /// <summary>Eases the hide pose's rotation and slide-in position toward 1 over <see
+    /// cref="HidePoseBlendSeconds"/> instead of popping into the rotated peek stance and
+    /// final tucked position on a single frame.</summary>
+    private void UpdateHideAmount(double delta)
+    {
+        double target = _stateMachine.Current == CharacterState.Hide ? 1 : 0;
+        double step = delta / HidePoseBlendSeconds;
+        _hideAmount = target > _hideAmount
+            ? Math.Min(target, _hideAmount + step)
+            : Math.Max(target, _hideAmount - step);
     }
 
     private DesktopPlatform? FollowAttachedPlatform(PlatformSnapshot snapshot)
@@ -976,17 +1144,41 @@ internal sealed class OverlayForm : Form
         (_, double workLeft, double workRight) = GetCurrentWorkArea();
         DesktopPlatform? leftWall = bounds.LeftWall;
         DesktopPlatform? rightWall = bounds.RightWall;
-        if (leftWall is null && bounds.Left <= workLeft + 0.5)
+        double left = bounds.Left;
+        double right = bounds.Right;
+        if (leftWall is null && left <= workLeft + 0.5)
         {
             leftWall = CreateScreenEdgePlatform(isLeftEdge: true);
         }
 
-        if (rightWall is null && bounds.Right >= workRight - 0.5)
+        if (rightWall is null && right >= workRight - 0.5)
         {
             rightWall = CreateScreenEdgePlatform(isLeftEdge: false);
         }
 
-        return (bounds.Left, bounds.Right, leftWall, rightWall);
+        // A window's own surface can extend past the monitor's work area (dragged so it
+        // hangs off the side) — a segment sitting on top of it must still stop walking at
+        // the real screen edge instead of continuing onto the off-screen portion, or the
+        // character can walk clean off the visible desktop and only snap back once
+        // something else re-clamps it (reading as a sudden teleport).
+        if (left < workLeft)
+        {
+            left = workLeft;
+        }
+
+        if (right > workRight)
+        {
+            right = workRight;
+        }
+
+        return (left, right, leftWall, rightWall);
+    }
+
+    private RectD GetCurrentScreenBounds()
+    {
+        (double floor, double left, double right) = GetCurrentWorkArea();
+        double top = GetCurrentMonitorTop();
+        return new RectD(left, top, right - left, floor - top);
     }
 
     private DesktopPlatform CreateScreenEdgePlatform(bool isLeftEdge)

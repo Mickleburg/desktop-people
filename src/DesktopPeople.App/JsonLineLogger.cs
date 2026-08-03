@@ -25,7 +25,23 @@ internal sealed class JsonLineLogger
         string line = JsonSerializer.Serialize(entry);
         lock (_gate)
         {
-            File.AppendAllText(_logPath, line + Environment.NewLine);
+            try
+            {
+                File.AppendAllText(_logPath, line + Environment.NewLine);
+            }
+            catch (IOException)
+            {
+                // The log file can be transiently locked by another process (antivirus, a
+                // second instance, cloud sync, ...). Losing one line is harmless, but this
+                // runs on the UI thread's hot path (every frame's window reconciliation),
+                // and the app's own ThreadException/UnhandledException handlers call back
+                // into this same method to log whatever just failed — letting the exception
+                // escape here risks that handler throwing too, cascading a single locked
+                // file into a genuinely fatal, unrecoverable crash instead of one dropped line.
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
         }
     }
 }

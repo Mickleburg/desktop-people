@@ -55,6 +55,8 @@ internal static class PlatformCoreTests
         new("wall climb retargets to a platform that moved mid-climb", WallClimbRetargetsToMovedPlatform),
         new("wall grab detector accepts a screen-edge platform", WallGrabAcceptsScreenEdgePlatform),
         new("wall grab detector ignores a desktop-kind platform", WallGrabIgnoresDesktopPlatform),
+        new("wall climb clamps horizontally to the given screen bounds", WallClimbClampsHorizontallyToScreenBounds),
+        new("wall climb clamps its bottom to the given screen floor", WallClimbClampsBottomToScreenFloor),
     ];
 
     private static void VisibleWindowIncluded() =>
@@ -476,6 +478,44 @@ internal static class PlatformCoreTests
         ClimbStep afterMove = climb.Advance(topY, 40);
         AssertEx.Near(moved.Bounds.Right, afterMove.Position.X);
         AssertEx.True(Math.Abs(afterMove.Position.X - beforeMove.Position.X) > 1);
+    }
+
+    private static void WallClimbClampsHorizontallyToScreenBounds()
+    {
+        // A window hanging mostly off the right side of a narrow screen must not let the
+        // character climb out into the off-screen portion — Start()/Retarget() clamp both
+        // the clinging (wall-face) and ledge (top-of-climb) X to the given screen bounds
+        // instead of following the platform's real (partly off-screen) geometry verbatim.
+        var climb = new CharacterWallClimb();
+        DesktopPlatform platform = Platform("window:1", 800, 100, 200);
+        var screenBounds = new RectD(0, 0, 500, 600);
+        climb.Start(platform, WallSide.Left, new Size2(20, 40), screenBounds);
+        double topY = platform.Segments[0].SurfaceY - 40;
+
+        ClimbStep clinging = climb.Advance(topY, 40);
+        AssertEx.True(clinging.Position.X <= (screenBounds.Right - 20) + 0.01);
+
+        ClimbStep atTop = climb.Advance(topY, 0);
+        AssertEx.Equal(ClimbOutcome.ReachedTop, atTop.Outcome);
+        AssertEx.True(atTop.Position.X <= (screenBounds.Right - 20) + 0.01);
+    }
+
+    private static void WallClimbClampsBottomToScreenFloor()
+    {
+        // A window taller than the monitor (extending well below the visible work area)
+        // must not let the character climb down past the real screen floor, the same way
+        // the horizontal wall face is clamped to the screen's sides.
+        DesktopPlatform platform = Platform("window:1", 100, 50, 200) with
+        {
+            Bounds = new RectD(100, 50, 200, 800),
+        };
+        var screenBounds = new RectD(0, 0, 500, 300);
+        var climb = new CharacterWallClimb();
+        climb.Start(platform, WallSide.Right, new Size2(20, 40), screenBounds);
+
+        ClimbStep step = climb.Advance(100, 100_000);
+        AssertEx.Equal(ClimbOutcome.ReachedBottom, step.Outcome);
+        AssertEx.Near(screenBounds.Bottom - 40, step.Position.Y);
     }
 
     private static void WallGrabAcceptsScreenEdgePlatform()

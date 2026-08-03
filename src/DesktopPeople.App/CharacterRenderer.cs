@@ -12,7 +12,8 @@ internal readonly record struct CharacterPose(
     int ClimbWallDirection = 1,
     bool ShowShadow = false,
     double ClimbAmount = 0,
-    int HidePeekDirection = 1);
+    int HidePeekDirection = 1,
+    double HideAmount = 1);
 
 internal sealed class CharacterRenderer
 {
@@ -48,6 +49,14 @@ internal sealed class CharacterRenderer
             : 0;
         float climbLegCycle = climbing ? (float)Math.Sin(pose.AnimationTime * cadence) : 0;
 
+        // The actual wall face being climbed, in the same coordinate space as everything
+        // else here — shared by both hands and both legs so all four limbs reach for the
+        // same line instead of each computing its own approximation and drifting apart
+        // (previously the legs derived their reach from their own hip X, so one leg
+        // consistently overshot past the wall while the other fell short and never
+        // actually touched it, reading as pawing at open air).
+        float climbWallLineX = pose.ClimbWallDirection > 0 ? x + width + (width * 0.03f) : x - (width * 0.03f);
+
         // Sitting, the landing impact, and standing back up all share the same
         // knees-bent silhouette; only how CrouchAmount got there (locked vs. decaying) differs.
         float crouch = Math.Clamp((float)pose.CrouchAmount, 0, 1);
@@ -77,57 +86,92 @@ internal sealed class CharacterRenderer
 
         if (pose.State == CharacterState.Hide)
         {
-            // Draws a mostly-normal angled body — head, a real torso (not just a collar
-            // sliver), one braced arm — rather than a bespoke small peek shape. OverlayForm
-            // clips painting against the wall's own rectangle before calling Draw, so
-            // whatever part of this naturally overlaps the wall (the far side, away from
-            // HidePeekDirection) is genuinely cut off there, the way real occlusion would
-            // look, while the near side leaning out stays fully visible.
+            // Picture the whole character rigidly rotated ~45° around a pivot that sits
+            // exactly on the wall's own edge at shoulder height — the same X OverlayForm
+            // clips paint against. A single rotation swings whatever is above the pivot
+            // (the head) out to the peek side while swinging whatever hangs below it (the
+            // torso) to the wall side, so the vertical clip genuinely cuts the silhouette
+            // into a "leaning around the corner" shape instead of just trimming a
+            // barely-offset standing pose. HideAmount eases the rotation in from 0 (a
+            // normal upright bust) up to full lean as the character settles in, in lockstep
+            // with OverlayForm's position slide, instead of popping straight into the
+            // rotated stance on the first Hide frame.
+            float hideEase = Math.Clamp((float)pose.HideAmount, 0, 1);
+            float pivotX = x + (width / 2);
+            float pivotY = y + (height * 0.34f);
+            float leanAngleDegrees = pose.HidePeekDirection * 45f * hideEase;
+            double leanAngleRadians = leanAngleDegrees * Math.PI / 180.0;
+            float sin = (float)Math.Sin(leanAngleRadians);
+            float cos = (float)Math.Cos(leanAngleRadians);
+
+            (float X, float Y) RotateFromPivot(float localDx, float localDy) => (
+                pivotX + (localDx * cos) - (localDy * sin),
+                pivotY + (localDx * sin) + (localDy * cos));
+
             float peekHeadSize = width * 0.52f;
-            float lean = pose.HidePeekDirection * width * 0.16f;
-            float peekHeadX = x + ((width - peekHeadSize) / 2) + lean;
-            float peekHeadY = y + (height * 0.017f);
 
+            // Head-to-pivot distance mirrors the same ratio the normal (non-Hide) pose uses
+            // between its head and torso — torsoTop sits at headSize*0.96 below the head's
+            // own top edge there, i.e. headSize*0.46 below its center — instead of an
+            // unrelated fraction of overall height. The previous value put the head's own
+            // edge a visible gap away from the pivot (where the torso's top is anchored),
+            // reading as a head floating disconnected above the body.
+            float headOffset = peekHeadSize * 0.46f;
+            (float headCenterX, float headCenterY) = RotateFromPivot(0, -headOffset);
+
+            // The torso is built as a normal, unrotated rounded rect hanging straight down
+            // from the pivot (top-center exactly at the pivot point), then the whole path
+            // is rotated around that same pivot — a real geometric rotation of the shape
+            // itself, not just its anchor point, so the torso's edge reads as genuinely
+            // turned rather than merely translated. Sized to match the normal (non-Hide)
+            // pose's torso proportions exactly (torsoHeight below is height*0.34f too) —
+            // an earlier, taller value (0.56f) was picked to comfortably fit inside a real
+            // window's clip, but it made the torso visibly longer than the character's
+            // actual body: most noticeable right as a hide starts (before much rotation has
+            // clipped it away, the oversized rect reads as the torso stretching), and it
+            // remained a slightly wrong proportion in the fully-hidden sliver too. Windows
+            // are comfortably taller than the character regardless, so there's no need to
+            // over-extend past the real proportions to stay hidden.
             float peekTorsoWidth = width * 0.42f;
-            float peekTorsoHeight = height * 0.62f;
-            var peekTorso = new RectangleF(
-                x + ((width - peekTorsoWidth) / 2) + (lean * 0.3f),
-                peekHeadY + (peekHeadSize * 0.8f),
-                peekTorsoWidth,
-                peekTorsoHeight);
-            graphics.FillRoundedRectangle(bodyBrush, peekTorso, peekTorso.Width * 0.25f);
-            graphics.DrawRoundedRectangle(outline, peekTorso, peekTorso.Width * 0.25f);
+            float peekTorsoHeight = height * 0.34f;
+            var localTorso = new RectangleF(pivotX - (peekTorsoWidth / 2), pivotY, peekTorsoWidth, peekTorsoHeight);
+            using (GraphicsPath torsoPath = GraphicsExtensions.CreateRoundedPath(localTorso, peekTorsoWidth * 0.25f))
+            using (var rotation = new Matrix())
+            {
+                rotation.RotateAt(leanAngleDegrees, new PointF(pivotX, pivotY));
+                torsoPath.Transform(rotation);
+                graphics.FillPath(bodyBrush, torsoPath);
+                graphics.DrawPath(outline, torsoPath);
+            }
 
-            // A hand braced right at the edge being hidden behind — anchored near the
-            // torso's wall-side (opposite the lean) rather than out where the head is
-            // leaning — reads as holding on to peek out, instead of a head floating free of
-            // whatever it's supposedly hiding against.
-            float peekHandAnchorX = pose.HidePeekDirection > 0 ? peekTorso.Left : peekTorso.Right;
-            float peekHandAnchorY = peekTorso.Top + (peekTorso.Height * 0.12f);
-            float peekHandX = x + (width * 0.5f) - (pose.HidePeekDirection * width * 0.05f);
-            float peekHandY = peekHandAnchorY + (height * 0.18f);
+            // A hand braced against the wall edge itself, noticeably lower than the
+            // head/shoulder junction (chest height, not neck height) so it reads as a
+            // distinct hand on the corner rather than a stray head-colored fragment sitting
+            // right where the head and torso already meet. It stays on the actual wall edge
+            // line (X = pivotX, unrotated) rather than rotating with the body — a hand
+            // pressed flat against a flat wall stays on that wall's plane regardless of how
+            // the shoulder behind it twists.
+            (float armStartX, float armStartY) = RotateFromPivot(0, height * 0.04f);
+            float handX = pivotX;
+            float handY = pivotY + (height * 0.12f);
             float peekHandSize = width * 0.16f;
-            graphics.DrawLine(outline, peekHandAnchorX, peekHandAnchorY, peekHandX, peekHandY);
-            graphics.FillEllipse(
-                faceBrush, peekHandX - (peekHandSize / 2), peekHandY - (peekHandSize / 2), peekHandSize, peekHandSize);
-            graphics.DrawEllipse(
-                outline, peekHandX - (peekHandSize / 2), peekHandY - (peekHandSize / 2), peekHandSize, peekHandSize);
+            graphics.DrawLine(outline, armStartX, armStartY, handX, handY);
+            graphics.FillEllipse(faceBrush, handX - (peekHandSize / 2), handY - (peekHandSize / 2), peekHandSize, peekHandSize);
+            graphics.DrawEllipse(outline, handX - (peekHandSize / 2), handY - (peekHandSize / 2), peekHandSize, peekHandSize);
 
-            graphics.FillEllipse(faceBrush, peekHeadX, peekHeadY, peekHeadSize, peekHeadSize);
-            graphics.DrawEllipse(outline, peekHeadX, peekHeadY, peekHeadSize, peekHeadSize);
+            graphics.FillEllipse(faceBrush, headCenterX - (peekHeadSize / 2), headCenterY - (peekHeadSize / 2), peekHeadSize, peekHeadSize);
+            graphics.DrawEllipse(outline, headCenterX - (peekHeadSize / 2), headCenterY - (peekHeadSize / 2), peekHeadSize, peekHeadSize);
 
+            // Eyes are offset from the head's own (unrotated) center and carried through the
+            // same rotation as the head, so the face itself reads as tilted with the lean
+            // instead of staying artificially level on a turned head.
             float peekEyeSize = peekHeadSize * 0.19f;
-            float peekEyeY = peekHeadY + (peekHeadSize * 0.44f);
-            float eyeLean = pose.HidePeekDirection * peekHeadSize * 0.06f;
-            DrawEye(
-                graphics, peekHeadX + (peekHeadSize * 0.26f) + eyeLean, peekEyeY, peekEyeSize, pose.GazeTarget, whiteBrush);
-            DrawEye(
-                graphics,
-                peekHeadX + (peekHeadSize * 0.74f) - peekEyeSize + eyeLean,
-                peekEyeY,
-                peekEyeSize,
-                pose.GazeTarget,
-                whiteBrush);
+            float eyeSpread = peekHeadSize * 0.145f;
+            float eyeDrop = peekHeadSize * 0.02f;
+            (float eyeAX, float eyeAY) = RotateFromPivot(-eyeSpread, -headOffset + eyeDrop);
+            (float eyeBX, float eyeBY) = RotateFromPivot(eyeSpread, -headOffset + eyeDrop);
+            DrawEye(graphics, eyeAX - (peekEyeSize / 2), eyeAY - (peekEyeSize / 2), peekEyeSize, pose.GazeTarget, whiteBrush);
+            DrawEye(graphics, eyeBX - (peekEyeSize / 2), eyeBY - (peekEyeSize / 2), peekEyeSize, pose.GazeTarget, whiteBrush);
             return;
         }
 
@@ -192,13 +236,12 @@ internal sealed class CharacterRenderer
                 // Both hands reach sideways to the wall they're actually clinging to (not
                 // symmetrically up into open air) and land on a visible grip point at its
                 // edge, so it reads as holding on rather than dangling.
-                float wallX = pose.ClimbWallDirection > 0 ? x + width + (width * 0.03f) : x - (width * 0.03f);
                 float climbHand1Y = shoulderY - (height * 0.05f) - climbReach;
                 float climbHand2Y = shoulderY + (height * 0.07f) + climbReach;
 
-                hand1X = Lerp(normalHand1X, wallX, climbAmount);
+                hand1X = Lerp(normalHand1X, climbWallLineX, climbAmount);
                 hand1Y = Lerp(normalHand1Y, climbHand1Y, climbAmount);
-                hand2X = Lerp(normalHand2X, wallX, climbAmount);
+                hand2X = Lerp(normalHand2X, climbWallLineX, climbAmount);
                 hand2Y = Lerp(normalHand2Y, climbHand2Y, climbAmount);
 
                 float handSize = width * 0.16f * climbAmount;
@@ -214,10 +257,10 @@ internal sealed class CharacterRenderer
 
         DrawLeg(
             graphics, outline, faceBrush, torso.Left + (width * 0.06f), hipY, x + (width * 0.27f) + stride,
-            legBottom, width, crouch, mirrored: false, climbAmount, pose.ClimbWallDirection, climbLegCycle);
+            legBottom, width, crouch, mirrored: false, climbAmount, climbWallLineX, climbLegCycle);
         DrawLeg(
             graphics, outline, faceBrush, torso.Right - (width * 0.06f), hipY, x + width - (width * 0.27f) - stride,
-            legBottom, width, crouch, mirrored: true, climbAmount, pose.ClimbWallDirection, -climbLegCycle);
+            legBottom, width, crouch, mirrored: true, climbAmount, climbWallLineX, -climbLegCycle);
     }
 
     private static void DrawLeg(
@@ -232,7 +275,7 @@ internal sealed class CharacterRenderer
         float crouch,
         bool mirrored,
         float climbAmount,
-        int wallDirection,
+        float wallLineX,
         float climbPhase)
     {
         // A knee pushed out to the side and down — clearly below and away from the
@@ -269,10 +312,13 @@ internal sealed class CharacterRenderer
         // Climbing presses the whole body to the wall (see climbLean in Draw()), and the
         // legs follow suit: knee bent toward the wall face, foot planted against it, with a
         // per-leg phase offset (opposite the other leg, like a normal gait) so they
-        // alternate instead of both hanging static while only the arms do any work.
-        float climbKneeX = hipX + (wallDirection * width * 0.24f);
+        // alternate instead of both hanging static while only the arms do any work. Both
+        // legs' feet reach the same wallLineX the hands use (previously each leg derived
+        // its own reach from its own hip X, so one consistently overshot past the wall
+        // while the other fell short and never actually touched it — pawing at open air).
+        float climbKneeX = hipX + ((wallLineX - hipX) * 0.55f);
         float climbKneeY = hipY + (legSpan * 0.3f) + (climbPhase * legSpan * 0.08f);
-        float climbFootX = hipX + (wallDirection * width * 0.32f);
+        float climbFootX = wallLineX;
         float climbFootY = footBottom - (legSpan * 0.1f) + (climbPhase * legSpan * 0.1f);
 
         float kneeX = Lerp(standKneeX, climbKneeX, climbAmount);
@@ -341,7 +387,7 @@ internal static class GraphicsExtensions
         graphics.DrawPath(pen, path);
     }
 
-    private static GraphicsPath CreateRoundedPath(RectangleF bounds, float radius)
+    internal static GraphicsPath CreateRoundedPath(RectangleF bounds, float radius)
     {
         float diameter = radius * 2;
         var path = new GraphicsPath();
