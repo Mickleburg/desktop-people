@@ -49,6 +49,12 @@ internal static class PlatformCoreTests
         new("wall grab detector finds an edge within reach while moving toward it", WallGrabFindsEdgeInReach),
         new("wall grab detector ignores an edge outside capture distance", WallGrabIgnoresOutOfReach),
         new("wall grab detector ignores a nearly stationary character", WallGrabIgnoresStationaryCharacter),
+        new("integrate reports the pre-bounce approach direction on a right-edge hit", IntegrateReportsRightEdgeApproachDirection),
+        new("integrate reports the pre-bounce approach direction on a left-edge hit", IntegrateReportsLeftEdgeApproachDirection),
+        new("integrate reports no edge direction when no boundary is hit", IntegrateReportsNoEdgeDirectionMidFloor),
+        new("wall climb retargets to a platform that moved mid-climb", WallClimbRetargetsToMovedPlatform),
+        new("wall grab detector accepts a screen-edge platform", WallGrabAcceptsScreenEdgePlatform),
+        new("wall grab detector ignores a desktop-kind platform", WallGrabIgnoresDesktopPlatform),
     ];
 
     private static void VisibleWindowIncluded() =>
@@ -418,6 +424,74 @@ internal static class PlatformCoreTests
         DesktopPlatform platform = Platform("window:1", 300, 50, 200);
         var character = new RectD(270, 80, 20, 40);
         AssertEx.True(WallGrabDetector.FindReachableEdge(character, 0, [platform], 16) is null);
+    }
+
+    private static void IntegrateReportsRightEdgeApproachDirection()
+    {
+        // Integrate's own bounce-turnaround flips WalkDirection to the opposite sign on the
+        // very same call that reports the edge hit (so free autonomous wandering turns
+        // around), which means a caller reading WalkDirection afterward to decide which
+        // wall/edge was just hit would always see the wrong (opposite) side — this was the
+        // root cause of the character teleporting to the far edge when a wall/climb reaction
+        // picked its side that way. HitEdgeDirection preserves the real approach direction.
+        var physics = new CharacterPhysics(new Vec2(190, 0), new Size2(20, 40));
+        CharacterMotionStep step = physics.Integrate(1, CharacterState.Walk, 0, 200);
+        AssertEx.True(step.HitHorizontalEdge);
+        AssertEx.Equal(1, step.HitEdgeDirection);
+        AssertEx.Equal(-1, physics.WalkDirection);
+    }
+
+    private static void IntegrateReportsLeftEdgeApproachDirection()
+    {
+        var physics = new CharacterPhysics(new Vec2(-5, 0), new Size2(20, 40));
+        physics.FaceDirection(-1);
+        CharacterMotionStep step = physics.Integrate(1, CharacterState.Walk, 0, 200);
+        AssertEx.True(step.HitHorizontalEdge);
+        AssertEx.Equal(-1, step.HitEdgeDirection);
+        AssertEx.Equal(1, physics.WalkDirection);
+    }
+
+    private static void IntegrateReportsNoEdgeDirectionMidFloor()
+    {
+        var physics = new CharacterPhysics(new Vec2(100, 0), new Size2(20, 40));
+        CharacterMotionStep step = physics.Integrate(0.016, CharacterState.Walk, 0, 200);
+        AssertEx.False(step.HitHorizontalEdge);
+        AssertEx.Equal(0, step.HitEdgeDirection);
+    }
+
+    private static void WallClimbRetargetsToMovedPlatform()
+    {
+        // A window dragged mid-climb must not leave the character clinging to wherever it
+        // used to be — Retarget() re-syncs the wall geometry to the platform's current
+        // bounds so the very next Advance() reflects the move.
+        var climb = new CharacterWallClimb();
+        DesktopPlatform platform = Platform("window:1", 100, 200, 200);
+        climb.Start(platform, WallSide.Right, new Size2(20, 40));
+        double topY = platform.Segments[0].SurfaceY - 40;
+        ClimbStep beforeMove = climb.Advance(topY, 40);
+        AssertEx.Near(platform.Bounds.Right, beforeMove.Position.X);
+
+        DesktopPlatform moved = Platform("window:1", 250, 200, 200);
+        climb.Retarget(moved, new Size2(20, 40));
+        ClimbStep afterMove = climb.Advance(topY, 40);
+        AssertEx.Near(moved.Bounds.Right, afterMove.Position.X);
+        AssertEx.True(Math.Abs(afterMove.Position.X - beforeMove.Position.X) > 1);
+    }
+
+    private static void WallGrabAcceptsScreenEdgePlatform()
+    {
+        DesktopPlatform edge = Platform("screen:left-edge", 300, 50, 2) with { Kind = PlatformKind.ScreenEdge };
+        var character = new RectD(270, 80, 20, 40);
+        WallGrabDetector.Reach? reach = WallGrabDetector.FindReachableEdge(character, 400, [edge], 16);
+        AssertEx.True(reach is not null);
+        AssertEx.Equal("screen:left-edge", reach!.Value.Platform.Id);
+    }
+
+    private static void WallGrabIgnoresDesktopPlatform()
+    {
+        DesktopPlatform floor = Platform("desktop:work-area", 300, 50, 200) with { Kind = PlatformKind.Desktop };
+        var character = new RectD(270, 80, 20, 40);
+        AssertEx.True(WallGrabDetector.FindReachableEdge(character, 400, [floor], 16) is null);
     }
 
     private static void ClimbToTopReattachesWithoutThrowing()

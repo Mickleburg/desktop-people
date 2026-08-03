@@ -110,6 +110,7 @@ public sealed class CharacterPhysics
         }
 
         bool hitHorizontalEdge = false;
+        int hitEdgeDirection = 0;
         double velocityX = Velocity.X;
         double velocityY = Velocity.Y;
 
@@ -139,27 +140,34 @@ public sealed class CharacterPhysics
         {
             x = leftBoundary;
             velocityX = Math.Abs(velocityX) * 0.55;
-            WalkDirection = 1;
             hitHorizontalEdge = true;
+            hitEdgeDirection = -1;
+            // This bounce turnaround (for free autonomous wandering) flips WalkDirection
+            // itself, so callers that need to know which edge was actually hit this frame
+            // can't rely on reading WalkDirection afterward — hitEdgeDirection preserves the
+            // pre-bounce approach direction for that (see CharacterMotionStep.HitEdgeDirection).
+            WalkDirection = 1;
         }
         else if (x + Size.Width > rightBoundary)
         {
             x = rightBoundary - Size.Width;
             velocityX = -Math.Abs(velocityX) * 0.55;
-            WalkDirection = -1;
             hitHorizontalEdge = true;
+            hitEdgeDirection = 1;
+            WalkDirection = -1;
         }
 
         Position = new Vec2(x, y);
         Velocity = new Vec2(velocityX, velocityY);
-        return new CharacterMotionStep(previousBounds, Bounds, hitHorizontalEdge);
+        return new CharacterMotionStep(previousBounds, Bounds, hitHorizontalEdge, hitEdgeDirection);
     }
 }
 
 public readonly record struct CharacterMotionStep(
     RectD PreviousBounds,
     RectD CurrentBounds,
-    bool HitHorizontalEdge);
+    bool HitHorizontalEdge,
+    int HitEdgeDirection = 0);
 
 public readonly record struct PhysicsStepResult(bool Landed, bool HitHorizontalEdge)
 {

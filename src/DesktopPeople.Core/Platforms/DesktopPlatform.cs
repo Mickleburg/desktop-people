@@ -6,6 +6,11 @@ public enum PlatformKind
 {
     Window,
     Desktop,
+
+    /// <summary>Synthetic wall standing for a monitor's own left/right work-area edge, so
+    /// the character can climb the side of the screen itself the same way it climbs a
+    /// window's vertical edge — never produced by the real window platform provider.</summary>
+    ScreenEdge,
 }
 
 public readonly record struct PlatformSegment(double Left, double Right, double SurfaceY)

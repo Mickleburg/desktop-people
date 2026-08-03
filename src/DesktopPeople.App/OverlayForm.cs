@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Diagnostics;
 using DesktopPeople.Core;
@@ -12,14 +13,20 @@ internal sealed class OverlayForm : Form
     private const double JumpHorizontalKick = 55;
     private const double ClimbSpeed = 70;
     private const double ClimbReverseChancePerSecond = 0.15;
+    private const double ClimbLetGoChancePerSecond = 0.05;
+    private const double ClimbPushOffChancePerSecond = 0.04;
+    private const double ClimbPushOffHorizontalSpeed = 260;
+    private const double ClimbPushOffVerticalImpulse = 560;
+    private const string LeftScreenEdgeId = "screen:left-edge";
+    private const string RightScreenEdgeId = "screen:right-edge";
     private const double FleeDuration = 4.0;
     private const double FleeJumpChancePerSecond = 0.3;
     private const double CursorEnergyReferenceSpeed = 900;
     private const double EnergySmoothingSeconds = 1.2;
     private const double WallGrabCaptureDistance = 16;
     private const double HideMoveTolerance = 6;
+    private const double HideLowerOffset = 0.14;
     private const double HideGrabOnMoveChance = 0.25;
-    private const double HideMaxReachHeights = 2.0;
     private const double ClimbPoseBlendSeconds = 0.22;
     private const double CoveredHopSpeed = 220;
     private const double MinCharacterScale = 0.7;
@@ -243,6 +250,31 @@ internal sealed class OverlayForm : Form
         WallSide activeWallSide = _stateMachine.Current == CharacterState.Hide ? _hidingSide : _wallClimb.Side;
         int climbWallDirection = activeWallSide == WallSide.Left ? 1 : -1;
         int hidePeekDirection = activeWallSide == WallSide.Left ? -1 : 1;
+
+        // While hiding, the overlay is still always drawn on top of every real window (it's
+        // a topmost click-through layer — there's no actual Z-order to hide behind), so the
+        // only way to make the character read as behind the wall is to not paint the part
+        // of it that would be. Clipping out the wall's own rectangle here, before Draw(),
+        // does that against a real (mostly-normal, angled) body pose instead of a
+        // hand-shaped cutout.
+        Region? previousClip = null;
+        if (_stateMachine.Current == CharacterState.Hide)
+        {
+            DesktopPlatform? hidingWall = _windowPlatforms.Snapshot.Platforms.FirstOrDefault(
+                p => p.Id == _hidingPlatformId);
+            if (hidingWall is not null)
+            {
+                previousClip = e.Graphics.Clip;
+                using Region clipped = previousClip.Clone();
+                clipped.Exclude(new RectangleF(
+                    (float)hidingWall.Bounds.X,
+                    (float)hidingWall.Bounds.Y,
+                    (float)hidingWall.Bounds.Width,
+                    (float)hidingWall.Bounds.Height));
+                e.Graphics.Clip = clipped;
+            }
+        }
+
         _renderer.Draw(
             e.Graphics,
             _physics.Bounds,
@@ -256,6 +288,12 @@ internal sealed class OverlayForm : Form
                 ShowShadow: _showPlatformDebug,
                 ClimbAmount: _climbAmount,
                 HidePeekDirection: hidePeekDirection));
+
+        if (previousClip is not null)
+        {
+            e.Graphics.Clip = previousClip;
+            previousClip.Dispose();
+        }
 
 #if DEBUG
         if (_showPlatformDebug)
@@ -441,7 +479,7 @@ internal sealed class OverlayForm : Form
                     WallGrabDetector.Reach? reach = WallGrabDetector.FindReachableEdge(
                         motion.CurrentBounds,
                         _physics.Velocity.X,
-                        snapshot.Platforms,
+                        WithScreenEdges(snapshot.Platforms),
                         WallGrabCaptureDistance);
                     if (reach is not null)
                     {
@@ -498,26 +536,45 @@ internal sealed class OverlayForm : Form
                 _stateMachine.Send(CharacterSignal.Landed);
             }
         }
-        else if (attachedPlatform is not null &&
-                 _stateMachine.Current is CharacterState.Idle or CharacterState.Walk
-                     or CharacterState.Run or CharacterState.Sit)
+        else
         {
-            if (motion.HitHorizontalEdge &&
-                _stateMachine.Current is CharacterState.Walk or CharacterState.Run &&
-                attachedPlatform.Kind == PlatformKind.Window)
+            if (_stateMachine.Current is not (CharacterState.Idle or CharacterState.Walk
+                or CharacterState.Run or CharacterState.Sit))
             {
-                DesktopPlatform? neighborWall = _physics.WalkDirection > 0 ? rightWall : leftWall;
+                return;
+            }
+
+            // A window standing in the walking path reacts the same way whether the
+            // character is perched on top of another window or on the bare desktop floor —
+            // previously this whole block (and thus GetHorizontalBoundaries's neighbor-wall
+            // search) only ran while attachedPlatform was a window, so a window sitting in
+            // front of a character walking on the bare floor was silently walked straight
+            // through with no reaction at all.
+            if (motion.HitHorizontalEdge && _stateMachine.Current is CharacterState.Walk or CharacterState.Run)
+            {
+                // motion.HitEdgeDirection is the direction of travel that caused the hit,
+                // captured before CharacterPhysics.Integrate's own bounce-turnaround flips
+                // WalkDirection to the opposite sign — reading _physics.WalkDirection here
+                // instead (as this used to) picks the wall/edge the character is NOT
+                // touching, teleporting it across to the far side to grab it.
+                DesktopPlatform? neighborWall = motion.HitEdgeDirection > 0 ? rightWall : leftWall;
                 if (neighborWall is not null)
                 {
-                    HandleWallEncounter(neighborWall, WallSideResolver.ForEncounteredWall(_physics.WalkDirection));
+                    HandleWallEncounter(neighborWall, WallSideResolver.ForEncounteredWall(motion.HitEdgeDirection));
                     return;
                 }
 
-                if (Random.Shared.NextDouble() < _behaviorTuning.ClimbChance)
+                if (attachedPlatform is { Kind: PlatformKind.Window } &&
+                    Random.Shared.NextDouble() < _behaviorTuning.ClimbChance)
                 {
-                    StartClimb(attachedPlatform, WallSideResolver.ForOwnEdge(_physics.WalkDirection));
+                    StartClimb(attachedPlatform, WallSideResolver.ForOwnEdge(motion.HitEdgeDirection));
                     return;
                 }
+            }
+
+            if (attachedPlatform is null)
+            {
+                return;
             }
 
             PlatformSegment? support = _attachment.FindSupportingSegment(
@@ -552,11 +609,11 @@ internal sealed class OverlayForm : Form
         });
     }
 
-    /// <summary>A window other than the one being walked on rises up across the walking
-    /// line ahead — with some chance climb up its near face, with some chance duck out of
-    /// sight behind it, otherwise it's just a wall and the bounce that already happened
-    /// this frame (via the tightened boundary from <see cref="GetHorizontalBoundaries"/>)
-    /// is the whole reaction.</summary>
+    /// <summary>A window other than the one being walked on (or the bare edge of the
+    /// screen itself) rises up across the walking line ahead — with some chance climb up
+    /// its near face, with some chance duck out of sight behind it, otherwise it's just a
+    /// wall and the bounce that already happened this frame (via the tightened boundary
+    /// from <see cref="GetHorizontalBoundaries"/>) is the whole reaction.</summary>
     private void HandleWallEncounter(DesktopPlatform wall, WallSide side)
     {
         double roll = Random.Shared.NextDouble();
@@ -566,13 +623,9 @@ internal sealed class OverlayForm : Form
             return;
         }
 
-        // Hiding snaps the character up to the wall's own top edge so its head can peek
-        // above it — fine for a nearby ledge, but a tall wall's top could be many screen
-        // heights away. Only offer it when that hop stays plausible; a too-tall wall just
-        // falls through to a plain bounce instead.
-        bool closeEnoughToHide =
-            Math.Abs(wall.Bounds.Y - _physics.Bounds.Bottom) <= _physics.Size.Height * HideMaxReachHeights;
-        if (closeEnoughToHide && roll < _behaviorTuning.ClimbChance + _behaviorTuning.HideChance)
+        // Hiding "behind" the bare edge of the screen doesn't make sense — there's nothing
+        // there to hide behind.
+        if (wall.Kind != PlatformKind.ScreenEdge && roll < _behaviorTuning.ClimbChance + _behaviorTuning.HideChance)
         {
             EnterHide(wall, side);
         }
@@ -580,11 +633,14 @@ internal sealed class OverlayForm : Form
 
     private void EnterHide(DesktopPlatform wall, WallSide side)
     {
-        double headSize = _physics.Size.Width * 0.52;
-        double bodyY = wall.Bounds.Y - (headSize * 0.5);
+        // X tucks the character beside the wall's edge; Y stays close to where it was
+        // already standing — a little lower still (HideLowerOffset), not up at the wall's
+        // own top corner — so the peek reads at roughly natural head height next to the
+        // wall, the way a person actually crouched slightly to peek around a corner would.
         double bodyX = side == WallSide.Left
             ? wall.Bounds.X - (_physics.Size.Width * 0.5)
             : wall.Bounds.Right - (_physics.Size.Width * 0.5);
+        double bodyY = _physics.Position.Y + (_physics.Size.Height * HideLowerOffset);
         _physics.SetPosition(new Vec2(bodyX, bodyY));
         _hidingPlatformId = wall.Id;
         _hidingStartBounds = wall.Bounds;
@@ -623,7 +679,7 @@ internal sealed class OverlayForm : Form
 
     private void UpdateClimb(double delta, PlatformSnapshot snapshot)
     {
-        DesktopPlatform? platform = snapshot.Platforms.FirstOrDefault(p => p.Id == _wallClimb.PlatformId);
+        DesktopPlatform? platform = ResolveClimbPlatform(snapshot);
         if (platform is null)
         {
             _wallClimb.Stop();
@@ -631,9 +687,37 @@ internal sealed class OverlayForm : Form
             return;
         }
 
-        if (_climbDirection > 0 && Random.Shared.NextDouble() < ClimbReverseChancePerSecond * delta)
+        // Re-sync every frame, not just once at Start(): otherwise a window dragged or
+        // resized mid-climb leaves the character clinging to wherever it used to be.
+        _wallClimb.Retarget(platform, _physics.Size);
+
+        double roll = Random.Shared.NextDouble();
+        if (roll < ClimbLetGoChancePerSecond * delta)
         {
-            _climbDirection = -1;
+            // Just loses its grip and drops — a climb doesn't only ever end at the top or
+            // bottom of the wall.
+            _wallClimb.Stop();
+            _stateMachine.Send(CharacterSignal.SupportLost);
+            return;
+        }
+
+        if (roll < (ClimbLetGoChancePerSecond + ClimbPushOffChancePerSecond) * delta)
+        {
+            // Pushes off sideways, away from the wall, with enough of an upward kick to
+            // plausibly land on top of something nearby instead of just dropping straight
+            // down — the same Fall-state landing/ceiling/jump-grab logic already handles
+            // wherever it ends up.
+            double pushDirection = _wallClimb.Side == WallSide.Left ? -1 : 1;
+            _wallClimb.Stop();
+            _stateMachine.Send(CharacterSignal.SupportLost);
+            _physics.Nudge(new Vec2(pushDirection * ClimbPushOffHorizontalSpeed, -ClimbPushOffVerticalImpulse));
+            _logger.Write("character_pushed_off_wall", new { platform = platform.Id });
+            return;
+        }
+
+        if (Random.Shared.NextDouble() < ClimbReverseChancePerSecond * delta)
+        {
+            _climbDirection = -_climbDirection;
         }
 
         ClimbStep step = _wallClimb.Advance(_physics.Position.Y, _climbDirection * ClimbSpeed * delta);
@@ -641,6 +725,15 @@ internal sealed class OverlayForm : Form
 
         if (step.Outcome == ClimbOutcome.ReachedTop)
         {
+            if (platform.Kind == PlatformKind.ScreenEdge)
+            {
+                // The side of the screen has no horizontal surface to climb out onto at the
+                // top, unlike a window — just runs out of wall and drops.
+                _wallClimb.Stop();
+                _stateMachine.Send(CharacterSignal.SupportLost);
+                return;
+            }
+
             // Advance() already eases the position onto the ledge (flush with the edge)
             // as it nears the top, so by the time ReachedTop fires there's nothing left to
             // snap — attaching right where it already is just works.
@@ -654,6 +747,21 @@ internal sealed class OverlayForm : Form
             _wallClimb.Stop();
             _stateMachine.Send(CharacterSignal.SupportLost);
         }
+    }
+
+    /// <summary>Looks up the platform a climb is currently clinging to. Real windows come
+    /// straight from the snapshot; the synthetic screen-edge walls are never part of it (the
+    /// window platform provider has no reason to know about them), so they're rebuilt fresh
+    /// from the current monitor geometry instead — that also keeps them correct if the work
+    /// area itself changes mid-climb (e.g. the taskbar auto-hiding).</summary>
+    private DesktopPlatform? ResolveClimbPlatform(PlatformSnapshot snapshot)
+    {
+        if (_wallClimb.PlatformId == LeftScreenEdgeId || _wallClimb.PlatformId == RightScreenEdgeId)
+        {
+            return CreateScreenEdgePlatform(isLeftEdge: _wallClimb.PlatformId == LeftScreenEdgeId);
+        }
+
+        return snapshot.Platforms.FirstOrDefault(p => p.Id == _wallClimb.PlatformId);
     }
 
     private void UpdateAutonomousBehavior()
@@ -680,6 +788,17 @@ internal sealed class OverlayForm : Form
                 break;
             case CharacterState.Sit when _stateTime >= _behaviorTuning.SitDuration:
                 _stateMachine.Send(CharacterSignal.StandRequested);
+                break;
+            case CharacterState.Hide when _stateTime >= _behaviorTuning.HideDuration:
+                // Otherwise hiding has no way out at all short of the wall itself moving or
+                // the user grabbing it — routing through SupportLost (like the "wall moved"
+                // exit already does) re-derives gravity/landing normally next frame instead
+                // of assuming Idle is safe: if the wall is still right there it re-lands
+                // within a frame or two (imperceptible), and if it isn't, the character
+                // properly falls instead of floating in place.
+                _hidingPlatformId = null;
+                _stateMachine.Send(CharacterSignal.SupportLost);
+                _logger.Write("character_stopped_hiding");
                 break;
         }
     }
@@ -823,8 +942,6 @@ internal sealed class OverlayForm : Form
             {
                 const double footWidthRatio = 0.42;
                 double overhang = (_physics.Size.Width - (_physics.Size.Width * footWidthRatio)) / 2;
-                double left = segment.Value.Left - overhang;
-                double right = segment.Value.Right + overhang;
 
                 // A different window standing in the way is a wall too, and must stop
                 // horizontal motion at its own edge even if the walked-on platform's
@@ -833,26 +950,94 @@ internal sealed class OverlayForm : Form
                     attachedPlatform,
                     _physics.Bounds,
                     snapshot.Platforms);
-                DesktopPlatform? leftWall = null;
-                DesktopPlatform? rightWall = null;
-                if (neighbors.Left is { } leftNeighbor && leftNeighbor.Boundary > left)
-                {
-                    left = leftNeighbor.Boundary;
-                    leftWall = leftNeighbor.Platform;
-                }
-
-                if (neighbors.Right is { } rightNeighbor && rightNeighbor.Boundary < right)
-                {
-                    right = rightNeighbor.Boundary;
-                    rightWall = rightNeighbor.Platform;
-                }
-
-                return (left, right, leftWall, rightWall);
+                return WithScreenEdgeFallback(
+                    ClampToNeighborWalls(segment.Value.Left - overhang, segment.Value.Right + overhang, neighbors));
             }
         }
 
+        // No attached window means the character is walking the bare desktop floor — but a
+        // window can still be sitting squarely in its path there, and must stop it exactly
+        // like a neighbor window would while perched on top of a different platform.
         (_, double workLeft, double workRight) = GetCurrentWorkArea();
-        return (workLeft, workRight, null, null);
+        WallEncounterDetector.Neighbors floorNeighbors = WallEncounterDetector.FindNeighborWalls(
+            CreateDesktopPlatform(),
+            _physics.Bounds,
+            snapshot.Platforms);
+        return WithScreenEdgeFallback(ClampToNeighborWalls(workLeft, workRight, floorNeighbors));
+    }
+
+    /// <summary>When neither a real platform edge nor a neighbor window constrains a side,
+    /// the boundary is the literal edge of the monitor's work area — substitute the
+    /// synthetic screen-edge wall there so walking into it offers the same climb/bounce
+    /// reaction as walking into a window, instead of just silently stopping.</summary>
+    private (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) WithScreenEdgeFallback(
+        (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) bounds)
+    {
+        (_, double workLeft, double workRight) = GetCurrentWorkArea();
+        DesktopPlatform? leftWall = bounds.LeftWall;
+        DesktopPlatform? rightWall = bounds.RightWall;
+        if (leftWall is null && bounds.Left <= workLeft + 0.5)
+        {
+            leftWall = CreateScreenEdgePlatform(isLeftEdge: true);
+        }
+
+        if (rightWall is null && bounds.Right >= workRight - 0.5)
+        {
+            rightWall = CreateScreenEdgePlatform(isLeftEdge: false);
+        }
+
+        return (bounds.Left, bounds.Right, leftWall, rightWall);
+    }
+
+    private DesktopPlatform CreateScreenEdgePlatform(bool isLeftEdge)
+    {
+        (double floor, double workLeft, double workRight) = GetCurrentWorkArea();
+        double top = GetCurrentMonitorTop();
+        const double thickness = 2;
+        double edgeX = isLeftEdge ? workLeft : workRight;
+        double left = isLeftEdge ? edgeX - thickness : edgeX;
+        return new DesktopPlatform
+        {
+            Id = isLeftEdge ? LeftScreenEdgeId : RightScreenEdgeId,
+            Kind = PlatformKind.ScreenEdge,
+            Bounds = new RectD(left, top, thickness, floor - top),
+            Segments = [new PlatformSegment(left, left + thickness, top)],
+            ZOrder = int.MaxValue,
+            MonitorId = "screen-edge",
+            MonitorTop = top,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
+    private List<DesktopPlatform> WithScreenEdges(ImmutableArray<DesktopPlatform> platforms)
+    {
+        var combined = new List<DesktopPlatform>(platforms.Length + 2);
+        combined.AddRange(platforms);
+        combined.Add(CreateScreenEdgePlatform(isLeftEdge: true));
+        combined.Add(CreateScreenEdgePlatform(isLeftEdge: false));
+        return combined;
+    }
+
+    private static (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) ClampToNeighborWalls(
+        double left,
+        double right,
+        WallEncounterDetector.Neighbors neighbors)
+    {
+        DesktopPlatform? leftWall = null;
+        DesktopPlatform? rightWall = null;
+        if (neighbors.Left is { } leftNeighbor && leftNeighbor.Boundary > left)
+        {
+            left = leftNeighbor.Boundary;
+            leftWall = leftNeighbor.Platform;
+        }
+
+        if (neighbors.Right is { } rightNeighbor && rightNeighbor.Boundary < right)
+        {
+            right = rightNeighbor.Boundary;
+            rightWall = rightNeighbor.Platform;
+        }
+
+        return (left, right, leftWall, rightWall);
     }
 
     private DesktopPlatform CreateDesktopPlatform()

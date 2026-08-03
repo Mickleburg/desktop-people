@@ -27,7 +27,10 @@ public static class WallGrabDetector
 
         foreach (DesktopPlatform platform in platforms)
         {
-            if (platform.Kind != PlatformKind.Window ||
+            // Anything that isn't a flat floor is a candidate wall — this covers both real
+            // windows and the synthetic screen-edge platforms OverlayForm feeds in here so a
+            // thrown/falling character can catch the side of the monitor too.
+            if (platform.Kind == PlatformKind.Desktop ||
                 centerY < platform.Bounds.Y ||
                 centerY > platform.Bounds.Bottom)
             {

@@ -44,10 +44,19 @@ public sealed class CharacterWallClimb
         IsClimbing = true;
         PlatformId = platform.Id;
         Side = side;
-        _wallX = side == WallSide.Left
+        Retarget(platform, characterSize);
+    }
+
+    /// <summary>Re-syncs the clung-to wall's geometry to the platform's current bounds —
+    /// callers should invoke this every frame a climb is in progress (not just at Start),
+    /// otherwise a window dragged or resized mid-climb leaves the character clinging to
+    /// wherever the window used to be instead of where it actually is now.</summary>
+    public void Retarget(DesktopPlatform platform, Size2 characterSize)
+    {
+        _wallX = Side == WallSide.Left
             ? platform.Bounds.X - characterSize.Width
             : platform.Bounds.Right;
-        _ledgeX = side == WallSide.Left
+        _ledgeX = Side == WallSide.Left
             ? platform.Bounds.X
             : platform.Bounds.Right - characterSize.Width;
         _topY = platform.Segments[0].SurfaceY - characterSize.Height;
