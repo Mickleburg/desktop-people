@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Diagnostics;
 using DesktopPeople.Core;
@@ -6,90 +5,31 @@ using DesktopPeople.Core.Platforms;
 
 namespace DesktopPeople.App;
 
+/// <summary>
+/// The WinForms host: a transparent, click-through, always-on-top window that owns painting
+/// and input, and nothing else. All behaviour — physics, climbing, hiding, fleeing, the
+/// recovery guards — lives in <see cref="CharacterSimulation"/> so it is shared with the
+/// Godot host and, unlike when it lived here, actually reachable by unit tests.
+/// </summary>
 internal sealed class OverlayForm : Form
 {
-    private const double CrouchTransitionDuration = 0.18;
-    private const double JumpImpulse = 780;
-    private const double JumpHorizontalKick = 55;
-    private const double ClimbSpeed = 70;
-    private const double ClimbReverseChancePerSecond = 0.15;
-    private const double ClimbLetGoChancePerSecond = 0.05;
-    private const double ClimbPushOffChancePerSecond = 0.04;
-    private const double ClimbPushOffHorizontalSpeed = 260;
-    private const double ClimbPushOffVerticalImpulse = 560;
-    private const string LeftScreenEdgeId = "screen:left-edge";
-    private const string RightScreenEdgeId = "screen:right-edge";
-    private const double FleeDuration = 4.0;
-    private const double FleeJumpChancePerSecond = 0.3;
-    private const double CursorEnergyReferenceSpeed = 900;
-    private const double EnergySmoothingSeconds = 1.2;
-    private const double WallGrabCaptureDistance = 16;
-    private const double HideMoveTolerance = 6;
-    private const double HideLowerOffset = 0.14;
-    private const double HideGrabOnMoveChance = 0.25;
-    private const double ClimbPoseBlendSeconds = 0.22;
-    private const double HidePoseBlendSeconds = 0.28;
-    private const double PlatformMissingGraceSeconds = 0.4;
-    private const double CoveredHopSpeed = 220;
-    private const double MinCharacterScale = 0.7;
-    private const double MaxCharacterScale = 1.6;
-    private static readonly Size2 BaseCharacterSize = new(60, 114);
+    private const double TopMostReassertIntervalSeconds = 2.0;
     private static readonly Color TransparencyColor = Color.Fuchsia;
-    private readonly CharacterStateMachine _stateMachine = new();
-    private readonly CharacterPhysics _physics;
-    private readonly CharacterRenderer _renderer = new();
+
+    private readonly CharacterSimulation _simulation;
     private readonly IWindowPlatformProvider _windowPlatforms;
-    private readonly PlatformCollisionResolver _collisionResolver = new();
-    private readonly CharacterPlatformAttachment _attachment = new();
-    private readonly CharacterPlatformController _platformController;
-    private readonly CharacterWallClimb _wallClimb = new();
-    private readonly CharacterAttention _attention = new(proximityRadius: 220);
-    private readonly CharacterHarassmentTracker _harassment = new();
+    private readonly CharacterRenderer _renderer = new();
     private readonly JsonLineLogger _logger;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private long _previousTicks;
-    private double _stateTime;
-    private double _animationTime;
+    private double _topMostReassertSeconds;
+    private bool _clickThrough;
+    private bool _showPlatformDebug;
+    private string _lastMouseEvent = "none";
     private double _fps;
     private int _frames;
     private double _fpsElapsed;
-    private bool _isPaused;
-    private bool _isHolding;
-    private bool _clickThrough;
-    private bool _clicked;
-    private Vec2 _mouseDown;
-    private Vec2 _previousPointer;
-    private long _previousPointerTicks;
-    private Vec2 _releaseVelocity;
-    private string _lastMouseEvent = "none";
-    private string? _currentPlatformId;
-    private double _previousBottom;
-    private double _currentBottom;
-    private bool _showPlatformDebug;
-    private CharacterBehaviorTuning _behaviorTuning = CharacterBehaviorTuning.ForIntensity("normal");
-    private string _behaviorIntensity = "normal";
-    private Vec2 _gazeTarget;
-    private double _crouchAmount;
-    private double _crouchTransitionStart;
-    private double _crouchTransitionElapsed = double.PositiveInfinity;
-    private double _climbDirection = 1;
-    private double _secondsSinceInteraction = double.MaxValue / 2;
-    private double _cursorEnergy;
-    private Vec2 _lastFramePointer;
-    private bool _isFleeing;
-    private double _fleeSecondsRemaining;
-    private double _characterScale = 1.0;
-    private double _climbAmount;
-    private bool _jumpGrabAttempted;
-    private string? _hidingPlatformId;
-    private RectD _hidingStartBounds;
-    private WallSide _hidingSide;
-    private double _hideAmount;
-    private Vec2 _hideEntryPosition;
-    private double _climbPlatformMissingSeconds;
-    private double _hidingPlatformMissingSeconds;
-    private bool _pressedAgainstWall;
 
     public OverlayForm(
         JsonLineLogger logger,
@@ -98,8 +38,10 @@ internal sealed class OverlayForm : Form
     {
         _logger = logger;
         _windowPlatforms = windowPlatforms;
-        _physics = new CharacterPhysics(new Vec2(120, 60), BaseCharacterSize);
-        _platformController = new CharacterPlatformController(_attachment);
+        _simulation = new CharacterSimulation(
+            logger,
+            windowPlatforms,
+            new WinFormsScreenGeometry(() => Bounds));
 
         AutoScaleMode = AutoScaleMode.Dpi;
         BackColor = TransparencyColor;
@@ -118,7 +60,6 @@ internal sealed class OverlayForm : Form
             ControlStyles.ResizeRedraw,
             true);
 
-        _stateMachine.StateChanged += OnStateChanged;
         _timer = new System.Windows.Forms.Timer
         {
             Interval = Math.Max(15, 1_000 / Math.Clamp(targetFps, 30, 60)),
@@ -131,41 +72,31 @@ internal sealed class OverlayForm : Form
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool IsPaused
     {
-        get => _isPaused;
+        get => _simulation.IsPaused;
         set
         {
-            _isPaused = value;
+            _simulation.IsPaused = value;
             _lastMouseEvent = value ? "paused" : "resumed";
             Invalidate();
         }
     }
 
-    public CharacterState State => _stateMachine.Current;
+    public CharacterState State => _simulation.State;
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string BehaviorIntensity
     {
-        get => _behaviorIntensity;
-        set
-        {
-            _behaviorIntensity = value;
-            _behaviorTuning = CharacterBehaviorTuning.ForIntensity(value);
-        }
+        get => _simulation.BehaviorIntensity;
+        set => _simulation.BehaviorIntensity = value;
     }
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public double CharacterScale
     {
-        get => _characterScale;
-        set
-        {
-            _characterScale = Math.Clamp(value, MinCharacterScale, MaxCharacterScale);
-            _physics.Rescale(new Size2(
-                BaseCharacterSize.Width * _characterScale,
-                BaseCharacterSize.Height * _characterScale));
-        }
+        get => _simulation.CharacterScale;
+        set => _simulation.CharacterScale = value;
     }
 
     [Browsable(false)]
@@ -216,33 +147,8 @@ internal sealed class OverlayForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        ResetForRelease();
         (RectD overlayBounds, RectD virtualBounds) = GetCoordinateSpace();
-        _windowPlatforms.Start(overlayBounds, virtualBounds);
-        _logger.Write("overlay_created", new
-        {
-            virtual_screen = SystemInformation.VirtualScreen.ToString(),
-            monitor_count = Screen.AllScreens.Length,
-        });
-    }
-
-    /// <summary>Drops the character in fresh from the top, regardless of whatever state it
-    /// drifted into. The timer keeps running even while hidden behind the launcher (see
-    /// <see cref="UpdateFrame"/>'s own visibility guard — this is the belt to that
-    /// suspenders): without this, a character that autonomously sat down or attached to a
-    /// wall before the window was ever shown would appear frozen in mid-air on release,
-    /// since nothing re-checks support for a state that isn't Fall.</summary>
-    private void ResetForRelease()
-    {
-        _wallClimb.Stop();
-        _attachment.Detach();
-        _hidingPlatformId = null;
-        _currentPlatformId = null;
-        _isFleeing = false;
-        _fleeSecondsRemaining = 0;
-        _harassment.Reset();
-        PositionAtPrimaryScreen();
-        _stateMachine.Send(CharacterSignal.SupportLost);
+        _simulation.Start(overlayBounds, virtualBounds);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -254,63 +160,51 @@ internal sealed class OverlayForm : Form
             DrawPlatformDebug(e.Graphics);
         }
 #endif
-        WallSide activeWallSide = _stateMachine.Current == CharacterState.Hide ? _hidingSide : _wallClimb.Side;
-        int climbWallDirection = activeWallSide == WallSide.Left ? 1 : -1;
-        int hidePeekDirection = activeWallSide == WallSide.Left ? -1 : 1;
+        CharacterFrame frame = _simulation.CurrentFrame();
 
-        // While hiding, the overlay is still always drawn on top of every real window (it's
-        // a topmost click-through layer — there's no actual Z-order to hide behind), so the
-        // only way to make the character read as behind the wall is to not paint the part
-        // of it that would be. Clipping out the wall's own rectangle here, before Draw(),
-        // does that against a real (mostly-normal, angled) body pose instead of a
-        // hand-shaped cutout.
+        // The overlay is a topmost click-through layer, so there is no real Z-order to hide
+        // behind — the only way the character can read as being behind a window is to not
+        // paint the part that would be covered.
         Region? previousClip = null;
-        if (_stateMachine.Current == CharacterState.Hide)
+        if (frame.HidingWallBounds is { } wall)
         {
-            DesktopPlatform? hidingWall = _windowPlatforms.Snapshot.Platforms.FirstOrDefault(
-                p => p.Id == _hidingPlatformId);
-            if (hidingWall is not null)
-            {
-                previousClip = e.Graphics.Clip;
-                using Region clipped = previousClip.Clone();
-                clipped.Exclude(new RectangleF(
-                    (float)hidingWall.Bounds.X,
-                    (float)hidingWall.Bounds.Y,
-                    (float)hidingWall.Bounds.Width,
-                    (float)hidingWall.Bounds.Height));
-                e.Graphics.Clip = clipped;
-            }
+            previousClip = e.Graphics.Clip;
+            using Region clipped = previousClip.Clone();
+            clipped.Exclude(new RectangleF(
+                (float)wall.X,
+                (float)wall.Y,
+                (float)wall.Width,
+                (float)wall.Height));
+            e.Graphics.Clip = clipped;
         }
 
-        // While easing into Hide, the physics position has already jumped straight to the
-        // final tucked spot (needed for hit-testing/collision to be consistent right away)
-        // — only the paint position slides from where it was standing when hide was
-        // triggered, over HidePoseBlendSeconds, so the character visibly walks/settles
-        // into the corner instead of teleporting there on the first Hide frame.
-        RectD renderBody = _physics.Bounds;
-        if (_stateMachine.Current == CharacterState.Hide && _hideAmount < 1)
+        try
         {
-            renderBody = new RectD(
-                _hideEntryPosition.X + ((_physics.Position.X - _hideEntryPosition.X) * _hideAmount),
-                _hideEntryPosition.Y + ((_physics.Position.Y - _hideEntryPosition.Y) * _hideAmount),
-                _physics.Size.Width,
-                _physics.Size.Height);
+            _renderer.Draw(
+                e.Graphics,
+                frame.Body,
+                new CharacterPose(
+                    frame.State,
+                    frame.AnimationTime,
+                    frame.Clicked,
+                    frame.CrouchAmount,
+                    frame.GazeTarget,
+                    frame.ClimbWallDirection,
+                    ShowShadow: _showPlatformDebug,
+                    ClimbAmount: frame.ClimbAmount,
+                    HidePeekDirection: frame.HidePeekDirection,
+                    HideAmount: frame.HideAmount));
         }
-
-        _renderer.Draw(
-            e.Graphics,
-            renderBody,
-            new CharacterPose(
-                _stateMachine.Current,
-                _animationTime,
-                _clicked,
-                _crouchAmount,
-                _gazeTarget,
-                climbWallDirection,
-                ShowShadow: _showPlatformDebug,
-                ClimbAmount: _climbAmount,
-                HidePeekDirection: hidePeekDirection,
-                HideAmount: _hideAmount));
+        catch (Exception ex)
+        {
+            // Last-resort net. The simulation's own per-frame sanity check only covers the
+            // fields known to have gone bad before (position, then size — two rounds, two
+            // fields), and nothing upstream can promise to cover the next one. Catching here,
+            // at the boundary where the crash actually happens, is what stops a single bad
+            // float from crashing this paint on every frame forever and leaving a borderless,
+            // taskbar-less window nobody can close.
+            _simulation.NotifyRenderFailed(ex.ToString());
+        }
 
         if (previousClip is not null)
         {
@@ -329,48 +223,27 @@ internal sealed class OverlayForm : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        var pointer = new Vec2(e.X, e.Y);
-        if (e.Button != MouseButtons.Left || !GetInteractiveBounds().Inflate(8, 8).Contains(pointer))
+        if (e.Button != MouseButtons.Left)
         {
             return;
         }
 
-        _isHolding = true;
-        _attachment.Detach();
-        _wallClimb.Stop();
-        _hidingPlatformId = null;
-        _currentPlatformId = null;
-        Capture = true;
-        _mouseDown = pointer;
-        _previousPointer = pointer;
-        _previousPointerTicks = _clock.ElapsedTicks;
-        _releaseVelocity = Vec2.Zero;
-        _lastMouseEvent = "grab";
-        _secondsSinceInteraction = 0;
-        _harassment.RegisterInteraction();
-        _stateMachine.Send(CharacterSignal.Grabbed);
-        _physics.HoldAt(pointer);
+        if (_simulation.TryGrab(new Vec2(e.X, e.Y), _clock.Elapsed.TotalSeconds))
+        {
+            Capture = true;
+            _lastMouseEvent = "grab";
+        }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (!_isHolding)
+        if (!_simulation.IsHeld)
         {
             return;
         }
 
-        var pointer = new Vec2(e.X, e.Y);
-        long now = _clock.ElapsedTicks;
-        double elapsed = (now - _previousPointerTicks) / (double)Stopwatch.Frequency;
-        if (elapsed > 0.004)
-        {
-            _releaseVelocity = ((pointer - _previousPointer) * (1 / elapsed)).ClampMagnitude(1_600);
-            _previousPointer = pointer;
-            _previousPointerTicks = now;
-        }
-
-        _physics.HoldAt(pointer);
+        _simulation.Drag(new Vec2(e.X, e.Y), _clock.Elapsed.TotalSeconds);
         _lastMouseEvent = "drag";
         Invalidate();
     }
@@ -378,28 +251,14 @@ internal sealed class OverlayForm : Form
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (!_isHolding || e.Button != MouseButtons.Left)
+        if (!_simulation.IsHeld || e.Button != MouseButtons.Left)
         {
             return;
         }
 
-        var pointer = new Vec2(e.X, e.Y);
-        bool wasClick = (pointer - _mouseDown).Length < 8;
-        _isHolding = false;
+        _simulation.ReleaseGrab(new Vec2(e.X, e.Y));
         Capture = false;
-        _stateMachine.Send(CharacterSignal.Released);
-
-        if (wasClick)
-        {
-            _physics.Nudge(new Vec2(Random.Shared.Next(-170, 171), -520));
-            _clicked = true;
-            _lastMouseEvent = "click reaction";
-        }
-        else
-        {
-            _physics.Release(_releaseVelocity);
-            _lastMouseEvent = "throw";
-        }
+        _lastMouseEvent = "release";
     }
 
     protected override void Dispose(bool disposing)
@@ -416,11 +275,8 @@ internal sealed class OverlayForm : Form
     {
         if (!Visible)
         {
-            // Nothing to simulate while the character hasn't been released yet (or has been
-            // hidden again) — otherwise it keeps walking/sitting/running on the invisible
-            // desktop floor the whole time the launcher sits open, and shows up already deep
-            // into some unrelated state the moment it's finally released.
             _previousTicks = 0;
+            _simulation.Update(0, Vec2.Zero, visible: false);
             return;
         }
 
@@ -434,848 +290,19 @@ internal sealed class OverlayForm : Form
         double delta = (currentTicks - _previousTicks) / (double)Stopwatch.Frequency;
         _previousTicks = currentTicks;
         UpdateFps(delta);
+        ReassertTopMostPeriodically(delta);
+
+        // Pumping the platform provider stays here rather than inside the simulation: it
+        // needs this window's own screen-space rectangle to map real windows into overlay
+        // coordinates, which only the host knows.
         (RectD overlayBounds, RectD virtualBounds) = GetCoordinateSpace();
         _windowPlatforms.Pump(DateTimeOffset.UtcNow, overlayBounds, virtualBounds);
 
         Point clientPointer = IsHandleCreated ? PointToClient(Cursor.Position) : Point.Empty;
-        var pointerOverlay = new Vec2(clientPointer.X, clientPointer.Y);
-
-        if (!_isPaused)
-        {
-            _animationTime += delta;
-            _stateTime += delta;
-            _secondsSinceInteraction += delta;
-            UpdateCrouchAmount(delta);
-            UpdateClimbAmount(delta);
-            UpdateHideAmount(delta);
-            UpdateCursorEnergy(delta, pointerOverlay);
-
-            Vec2 characterCenter = new(
-                _physics.Position.X + (_physics.Size.Width / 2),
-                _physics.Position.Y + (_physics.Size.Height / 2));
-            double distanceToCursor = (characterCenter - pointerOverlay).Length;
-            _harassment.Update(delta, distanceToCursor);
-            UpdateFleeBehavior(delta, characterCenter, pointerOverlay);
-            _gazeTarget = _attention.ShouldTrackCursor(_animationTime, _secondsSinceInteraction, distanceToCursor)
-                ? pointerOverlay
-                : NeutralGazeTarget();
-
-            PlatformSnapshot snapshot = _windowPlatforms.Snapshot;
-            if (_stateMachine.Current == CharacterState.Climb)
-            {
-                UpdateClimb(delta, snapshot);
-            }
-            else if (_stateMachine.Current == CharacterState.Hide)
-            {
-                UpdateHiding(delta, snapshot);
-            }
-            else
-            {
-                UpdateGroundedPhysics(delta, snapshot);
-            }
-
-            RecoverFromInvalidPhysicsState();
-            UpdateAutonomousBehavior();
-            if (_clicked && _stateTime > 0.45)
-            {
-                _clicked = false;
-            }
-        }
+        _simulation.Update(delta, new Vec2(clientPointer.X, clientPointer.Y), visible: true);
 
         UpdateClickThrough(clientPointer);
         Invalidate();
-    }
-
-    /// <summary>Every position-mutating path on <see cref="CharacterPhysics"/> other than
-    /// <see cref="CharacterPhysics.SetPosition"/> (climbing, landing, hard-floor recovery,
-    /// rescaling, ...) writes straight through without validating — a bad read somewhere
-    /// upstream (e.g. degenerate window geometry mid-resize/close) can turn into a NaN or
-    /// astronomically large position that never throws on its own, but GDI+ does the moment
-    /// it's asked to draw an ellipse at those coordinates — and it does so every single
-    /// frame, with nothing to ever recover, since the underlying bad position just sits
-    /// there. The overlay is borderless, click-through and not in the taskbar, so that reads
-    /// as a permanently stuck, unclosable window (confirmed in a real crash log: a
-    /// `Graphics.DrawEllipse` "generic error" repeating from <see cref="CharacterRenderer"/>
-    /// with no recovery in between). Catching it here, right before the paint that would
-    /// otherwise crash, and snapping back to a safe on-screen spot is the same "one absolute
-    /// boundary" recovery already used for falling past the floor.</summary>
-    private void RecoverFromInvalidPhysicsState()
-    {
-        (_, RectD virtualBounds) = GetCoordinateSpace();
-        if (IsPositionSane(_physics.Position, virtualBounds))
-        {
-            return;
-        }
-
-        Vec2 badPosition = _physics.Position;
-        _wallClimb.Stop();
-        _attachment.Detach();
-        _currentPlatformId = null;
-        _hidingPlatformId = null;
-        PositionAtPrimaryScreen();
-        _stateMachine.Send(CharacterSignal.SupportLost);
-        _logger.Write("character_position_recovered", new { bad_position = badPosition.ToString() });
-    }
-
-    private static bool IsPositionSane(Vec2 position, RectD virtualBounds)
-    {
-        if (!double.IsFinite(position.X) || !double.IsFinite(position.Y))
-        {
-            return false;
-        }
-
-        // Generous margin beyond the actual virtual screen — legitimate motion (a big
-        // throw, climbing off toward a monitor edge) never needs more than a screen's worth
-        // of slack, so anything beyond that is corrupted state, not a character that's
-        // merely off-screen for a moment.
-        double margin = Math.Max(virtualBounds.Width, virtualBounds.Height) + 5_000;
-        return position.X >= virtualBounds.X - margin && position.X <= virtualBounds.Right + margin
-            && position.Y >= virtualBounds.Y - margin && position.Y <= virtualBounds.Bottom + margin;
-    }
-
-    private void UpdateGroundedPhysics(double delta, PlatformSnapshot snapshot)
-    {
-        DesktopPlatform? attachedPlatform = FollowAttachedPlatform(snapshot);
-        (double left, double right, DesktopPlatform? leftWall, DesktopPlatform? rightWall) =
-            GetHorizontalBoundaries(attachedPlatform, snapshot);
-        CharacterMotionStep motion = _physics.Integrate(delta, _stateMachine.Current, left, right);
-        _previousBottom = motion.PreviousBounds.Bottom;
-        _currentBottom = motion.CurrentBounds.Bottom;
-
-        // Read by UpdateFleeBehavior (one frame later — an imperceptible lag) to suppress
-        // its own independent jump roll while the wall-encounter reaction below is already
-        // deciding what to do about the exact same wall. Without this, a fleeing character
-        // pressed against a wall it's about to climb could also roll a flee-jump on any of
-        // the several frames it takes HandleWallEncounter's own roll to succeed, bouncing it
-        // into a little hop-and-immediately-land loop right at the wall before climbing
-        // actually starts.
-        _pressedAgainstWall = motion.HitHorizontalEdge && (leftWall is not null || rightWall is not null);
-
-        if (_stateMachine.Current == CharacterState.Fall)
-        {
-            if (_physics.Velocity.Y < 0)
-            {
-                if (!_jumpGrabAttempted)
-                {
-                    WallGrabDetector.Reach? reach = WallGrabDetector.FindReachableEdge(
-                        motion.CurrentBounds,
-                        _physics.Velocity.X,
-                        WithScreenEdges(snapshot.Platforms),
-                        WallGrabCaptureDistance);
-                    if (reach is not null)
-                    {
-                        _jumpGrabAttempted = true;
-                        if (Random.Shared.NextDouble() < _behaviorTuning.GrabChance)
-                        {
-                            StartClimb(reach.Value.Platform, reach.Value.Side, initialDirection: -1);
-                            return;
-                        }
-                    }
-                }
-
-                PlatformCollision? ceiling = _collisionResolver.ResolveUpward(
-                    motion.PreviousBounds,
-                    motion.CurrentBounds,
-                    _physics.Velocity.Y,
-                    snapshot.Platforms);
-                if (ceiling is not null)
-                {
-                    _physics.BonkCeiling(ceiling.Value.Segment.SurfaceY);
-                    _logger.Write("character_bonked_ceiling", new { platform = ceiling.Value.Platform.Id });
-                }
-
-                return;
-            }
-
-            var collisionPlatforms = new List<DesktopPlatform>(snapshot.Platforms.Length + 1);
-            collisionPlatforms.AddRange(snapshot.Platforms);
-            collisionPlatforms.Add(CreateDesktopPlatform());
-            PlatformCollision? collision = _collisionResolver.ResolveDownward(
-                motion.PreviousBounds,
-                motion.CurrentBounds,
-                _physics.Velocity.Y,
-                collisionPlatforms);
-            if (collision is not null)
-            {
-                _physics.LandOn(collision.Value.Segment.SurfaceY);
-                _currentPlatformId = collision.Value.Platform.Id;
-                if (collision.Value.Platform.Kind == PlatformKind.Window)
-                {
-                    _attachment.Attach(collision.Value.Platform, _physics.Bounds);
-                }
-                else
-                {
-                    _attachment.Detach();
-                }
-
-                _logger.Write("character_landed_on_platform", new
-                {
-                    platform = collision.Value.Platform.Id,
-                    kind = collision.Value.Platform.Kind.ToString(),
-                    surface_y = collision.Value.Segment.SurfaceY,
-                });
-                _stateMachine.Send(CharacterSignal.Landed);
-            }
-            else
-            {
-                // ResolveDownward only catches a continuous downward sweep crossing a
-                // surface — if the character is already past the desktop floor at the very
-                // start of a fall (e.g. having climbed down past a window that extends
-                // below the work area, or some other edge case placing it there directly),
-                // the sweep never "crosses" it and gravity would otherwise pull it further
-                // away every frame with nothing to ever catch it, off the bottom of the
-                // screen for good. The desktop floor is the one absolute boundary, so
-                // treat already being past it as an instant landing too.
-                double floorY = CreateDesktopPlatform().Segments[0].SurfaceY;
-                if (motion.CurrentBounds.Bottom >= floorY)
-                {
-                    _physics.LandOn(floorY);
-                    _currentPlatformId = "desktop:work-area";
-                    _attachment.Detach();
-                    _logger.Write("character_hard_floor_recovery", new { floor_y = floorY });
-                    _stateMachine.Send(CharacterSignal.Landed);
-                }
-            }
-        }
-        else
-        {
-            if (_stateMachine.Current is not (CharacterState.Idle or CharacterState.Walk
-                or CharacterState.Run or CharacterState.Sit))
-            {
-                return;
-            }
-
-            // A window standing in the walking path reacts the same way whether the
-            // character is perched on top of another window or on the bare desktop floor —
-            // previously this whole block (and thus GetHorizontalBoundaries's neighbor-wall
-            // search) only ran while attachedPlatform was a window, so a window sitting in
-            // front of a character walking on the bare floor was silently walked straight
-            // through with no reaction at all.
-            if (motion.HitHorizontalEdge && _stateMachine.Current is CharacterState.Walk or CharacterState.Run)
-            {
-                // motion.HitEdgeDirection is the direction of travel that caused the hit,
-                // captured before CharacterPhysics.Integrate's own bounce-turnaround flips
-                // WalkDirection to the opposite sign — reading _physics.WalkDirection here
-                // instead (as this used to) picks the wall/edge the character is NOT
-                // touching, teleporting it across to the far side to grab it.
-                DesktopPlatform? neighborWall = motion.HitEdgeDirection > 0 ? rightWall : leftWall;
-                if (neighborWall is not null)
-                {
-                    HandleWallEncounter(neighborWall, WallSideResolver.ForEncounteredWall(motion.HitEdgeDirection));
-                    return;
-                }
-
-                if (attachedPlatform is { Kind: PlatformKind.Window } &&
-                    Random.Shared.NextDouble() < _behaviorTuning.ClimbChance)
-                {
-                    StartClimb(attachedPlatform, WallSideResolver.ForOwnEdge(motion.HitEdgeDirection));
-                    return;
-                }
-            }
-
-            if (attachedPlatform is null)
-            {
-                return;
-            }
-
-            PlatformSegment? support = _attachment.FindSupportingSegment(
-                attachedPlatform,
-                _physics.Bounds);
-            if (support is null)
-            {
-                LosePlatformSupport();
-            }
-            else
-            {
-                _physics.SetPosition(new Vec2(
-                    _physics.Position.X,
-                    support.Value.SurfaceY - _physics.Size.Height - _attachment.VerticalOffset));
-                _attachment.Sync(attachedPlatform, _physics.Bounds);
-            }
-        }
-    }
-
-    private void StartClimb(DesktopPlatform platform, WallSide side, double initialDirection = 1)
-    {
-        _wallClimb.Start(platform, side, _physics.Size, GetCurrentScreenBounds());
-        _climbDirection = initialDirection;
-        _climbPlatformMissingSeconds = 0;
-        _attachment.Detach();
-        _currentPlatformId = null;
-        _stateMachine.Send(CharacterSignal.ClimbRequested);
-        _logger.Write("character_started_climbing", new
-        {
-            platform = platform.Id,
-            side = side.ToString(),
-            direction = initialDirection,
-        });
-    }
-
-    /// <summary>A window other than the one being walked on (or the bare edge of the
-    /// screen itself) rises up across the walking line ahead — with some chance climb up
-    /// its near face, with some chance duck out of sight behind it, otherwise it's just a
-    /// wall and the bounce that already happened this frame (via the tightened boundary
-    /// from <see cref="GetHorizontalBoundaries"/>) is the whole reaction.</summary>
-    private void HandleWallEncounter(DesktopPlatform wall, WallSide side)
-    {
-        double roll = Random.Shared.NextDouble();
-        if (roll < _behaviorTuning.ClimbChance)
-        {
-            StartClimb(wall, side, initialDirection: -1);
-            return;
-        }
-
-        // Hiding "behind" the bare edge of the screen doesn't make sense — there's nothing
-        // there to hide behind.
-        if (wall.Kind != PlatformKind.ScreenEdge && roll < _behaviorTuning.ClimbChance + _behaviorTuning.HideChance)
-        {
-            EnterHide(wall, side);
-        }
-    }
-
-    private void EnterHide(DesktopPlatform wall, WallSide side)
-    {
-        // X tucks the character beside the wall's edge; Y stays close to where it was
-        // already standing — a little lower still (HideLowerOffset), not up at the wall's
-        // own top corner — so the peek reads at roughly natural head height next to the
-        // wall, the way a person actually crouched slightly to peek around a corner would.
-        // Captured before the position snaps to the tucked spot below — OnPaint blends the
-        // *rendered* position from here up to the real (already-updated) physics position
-        // over HidePoseBlendSeconds, so the character visibly settles into the corner
-        // instead of teleporting there on the first Hide frame.
-        _hideEntryPosition = _physics.Position;
-
-        double bodyX = side == WallSide.Left
-            ? wall.Bounds.X - (_physics.Size.Width * 0.5)
-            : wall.Bounds.Right - (_physics.Size.Width * 0.5);
-        double bodyY = _physics.Position.Y + (_physics.Size.Height * HideLowerOffset);
-        _physics.SetPosition(new Vec2(bodyX, bodyY));
-        _hidingPlatformId = wall.Id;
-        _hidingStartBounds = wall.Bounds;
-        _hidingSide = side;
-        _hideAmount = 0;
-        _hidingPlatformMissingSeconds = 0;
-        _attachment.Detach();
-        _currentPlatformId = null;
-        _stateMachine.Send(CharacterSignal.HideRequested);
-        _logger.Write("character_hiding", new { wall = wall.Id, side = side.ToString() });
-    }
-
-    private void UpdateHiding(double delta, PlatformSnapshot snapshot)
-    {
-        DesktopPlatform? wall = snapshot.Platforms.FirstOrDefault(p => p.Id == _hidingPlatformId);
-        if (wall is null)
-        {
-            _hidingPlatformMissingSeconds += delta;
-            if (_hidingPlatformMissingSeconds < PlatformMissingGraceSeconds)
-            {
-                // The wall being hidden behind can vanish from a single snapshot when
-                // something briefly covers it full-screen (e.g. the screenshot/snip flash,
-                // or a reconciliation racing a toast notification) — that's not the window
-                // actually closing, so ride out a short grace window in place instead of
-                // dropping out of hiding over one bad frame.
-                return;
-            }
-
-            _stateMachine.Send(CharacterSignal.SupportLost);
-            return;
-        }
-
-        _hidingPlatformMissingSeconds = 0;
-        bool moved = Math.Abs(wall.Bounds.X - _hidingStartBounds.X) > HideMoveTolerance ||
-            Math.Abs(wall.Bounds.Y - _hidingStartBounds.Y) > HideMoveTolerance;
-        if (!moved)
-        {
-            return;
-        }
-
-        if (Random.Shared.NextDouble() < HideGrabOnMoveChance)
-        {
-            StartClimb(wall, _hidingSide);
-        }
-        else
-        {
-            _stateMachine.Send(CharacterSignal.SupportLost);
-        }
-    }
-
-    private void UpdateClimb(double delta, PlatformSnapshot snapshot)
-    {
-        DesktopPlatform? platform = ResolveClimbPlatform(snapshot);
-        if (platform is null)
-        {
-            _climbPlatformMissingSeconds += delta;
-            if (_climbPlatformMissingSeconds < PlatformMissingGraceSeconds)
-            {
-                // The climbed window can vanish from a single snapshot when something
-                // briefly covers it full-screen (e.g. the screenshot/snip flash animation,
-                // or a reconciliation racing a toast notification) — that's not the window
-                // actually closing, so ride out a short grace window holding position
-                // instead of dropping the climb over one bad frame.
-                return;
-            }
-
-            _wallClimb.Stop();
-            _stateMachine.Send(CharacterSignal.SupportLost);
-            return;
-        }
-
-        _climbPlatformMissingSeconds = 0;
-
-        // Re-sync every frame, not just once at Start(): otherwise a window dragged or
-        // resized mid-climb leaves the character clinging to wherever it used to be. The
-        // screen bounds are passed every time too, since the character can drift toward a
-        // different monitor mid-climb (e.g. a push-off) and the clamp should always follow
-        // whichever monitor it's actually next to.
-        _wallClimb.Retarget(platform, _physics.Size, GetCurrentScreenBounds());
-
-        double roll = Random.Shared.NextDouble();
-        if (roll < ClimbLetGoChancePerSecond * delta)
-        {
-            // Just loses its grip and drops — a climb doesn't only ever end at the top or
-            // bottom of the wall.
-            _wallClimb.Stop();
-            _stateMachine.Send(CharacterSignal.SupportLost);
-            return;
-        }
-
-        if (roll < (ClimbLetGoChancePerSecond + ClimbPushOffChancePerSecond) * delta)
-        {
-            // Pushes off sideways, away from the wall, with enough of an upward kick to
-            // plausibly land on top of something nearby instead of just dropping straight
-            // down — the same Fall-state landing/ceiling/jump-grab logic already handles
-            // wherever it ends up.
-            double pushDirection = _wallClimb.Side == WallSide.Left ? -1 : 1;
-            _wallClimb.Stop();
-            _stateMachine.Send(CharacterSignal.SupportLost);
-            _physics.Nudge(new Vec2(pushDirection * ClimbPushOffHorizontalSpeed, -ClimbPushOffVerticalImpulse));
-            _logger.Write("character_pushed_off_wall", new { platform = platform.Id });
-            return;
-        }
-
-        if (Random.Shared.NextDouble() < ClimbReverseChancePerSecond * delta)
-        {
-            _climbDirection = -_climbDirection;
-        }
-
-        ClimbStep step = _wallClimb.Advance(_physics.Position.Y, _climbDirection * ClimbSpeed * delta);
-        _physics.SetPosition(step.Position);
-
-        if (step.Outcome == ClimbOutcome.ReachedTop)
-        {
-            if (platform.Kind == PlatformKind.ScreenEdge)
-            {
-                // The side of the screen has no horizontal surface to climb out onto at the
-                // top, unlike a window — just runs out of wall and drops.
-                _wallClimb.Stop();
-                _stateMachine.Send(CharacterSignal.SupportLost);
-                return;
-            }
-
-            // Advance() already eases the position onto the ledge (flush with the edge)
-            // as it nears the top, so by the time ReachedTop fires there's nothing left to
-            // snap — attaching right where it already is just works.
-            _wallClimb.Stop();
-            _attachment.Attach(platform, _physics.Bounds);
-            _currentPlatformId = platform.Id;
-            _stateMachine.Send(CharacterSignal.Landed);
-        }
-        else if (step.Outcome == ClimbOutcome.ReachedBottom)
-        {
-            _wallClimb.Stop();
-            _stateMachine.Send(CharacterSignal.SupportLost);
-        }
-    }
-
-    /// <summary>Looks up the platform a climb is currently clinging to. Real windows come
-    /// straight from the snapshot; the synthetic screen-edge walls are never part of it (the
-    /// window platform provider has no reason to know about them), so they're rebuilt fresh
-    /// from the current monitor geometry instead — that also keeps them correct if the work
-    /// area itself changes mid-climb (e.g. the taskbar auto-hiding).</summary>
-    private DesktopPlatform? ResolveClimbPlatform(PlatformSnapshot snapshot)
-    {
-        if (_wallClimb.PlatformId == LeftScreenEdgeId || _wallClimb.PlatformId == RightScreenEdgeId)
-        {
-            return CreateScreenEdgePlatform(isLeftEdge: _wallClimb.PlatformId == LeftScreenEdgeId);
-        }
-
-        return snapshot.Platforms.FirstOrDefault(p => p.Id == _wallClimb.PlatformId);
-    }
-
-    private void UpdateAutonomousBehavior()
-    {
-        switch (_stateMachine.Current)
-        {
-            case CharacterState.Idle when _stateTime >= _behaviorTuning.IdleDelay:
-                CharacterSignal signal = _behaviorTuning.PickAutonomousTransition(Random.Shared.NextDouble());
-                if (signal == CharacterSignal.JumpRequested)
-                {
-                    TryJump();
-                }
-                else
-                {
-                    _stateMachine.Send(signal);
-                }
-
-                break;
-            case CharacterState.Walk when _stateTime >= _behaviorTuning.WalkDuration:
-                _stateMachine.Send(CharacterSignal.StopRequested);
-                break;
-            case CharacterState.Run when _stateTime >= _behaviorTuning.RunDuration:
-                _stateMachine.Send(CharacterSignal.StopRequested);
-                break;
-            case CharacterState.Sit when _stateTime >= _behaviorTuning.SitDuration:
-                _stateMachine.Send(CharacterSignal.StandRequested);
-                break;
-            case CharacterState.Hide when _stateTime >= _behaviorTuning.HideDuration:
-                // Otherwise hiding has no way out at all short of the wall itself moving or
-                // the user grabbing it — routing through SupportLost (like the "wall moved"
-                // exit already does) re-derives gravity/landing normally next frame instead
-                // of assuming Idle is safe: if the wall is still right there it re-lands
-                // within a frame or two (imperceptible), and if it isn't, the character
-                // properly falls instead of floating in place.
-                _hidingPlatformId = null;
-                _stateMachine.Send(CharacterSignal.SupportLost);
-                _logger.Write("character_stopped_hiding");
-                break;
-        }
-    }
-
-    private void TryJump()
-    {
-        if (!_stateMachine.Send(CharacterSignal.JumpRequested))
-        {
-            return;
-        }
-
-        _physics.Nudge(new Vec2(_physics.WalkDirection * JumpHorizontalKick, -JumpImpulse));
-        _logger.Write("character_jumped");
-    }
-
-    private void UpdateFleeBehavior(double delta, Vec2 characterCenter, Vec2 pointerOverlay)
-    {
-        bool wasFleeing = _isFleeing;
-        if (_harassment.IsFleeing)
-        {
-            _isFleeing = true;
-            _fleeSecondsRemaining = FleeDuration;
-        }
-        else if (_isFleeing)
-        {
-            _fleeSecondsRemaining -= delta;
-            if (_fleeSecondsRemaining <= 0)
-            {
-                _isFleeing = false;
-            }
-        }
-
-        if (!_isFleeing)
-        {
-            return;
-        }
-
-        if (!wasFleeing)
-        {
-            _logger.Write("character_fleeing_started");
-        }
-
-        switch (_stateMachine.Current)
-        {
-            case CharacterState.Sit:
-                _stateMachine.Send(CharacterSignal.StandRequested);
-                break;
-            case CharacterState.Idle or CharacterState.Walk:
-                _stateMachine.Send(CharacterSignal.RunRequested);
-                break;
-        }
-
-        if (_stateMachine.Current is CharacterState.Run or CharacterState.Walk)
-        {
-            _physics.FaceDirection(characterCenter.X >= pointerOverlay.X ? 1 : -1);
-            // Pressed against a wall, HandleWallEncounter is already rolling its own
-            // climb/hide/stop reaction every frame — an independent jump attempt on top of
-            // that just produces a little hop-and-immediately-land right at the wall,
-            // possibly several times in a row before the wall reaction finally resolves.
-            if (!_pressedAgainstWall && Random.Shared.NextDouble() < FleeJumpChancePerSecond * delta)
-            {
-                TryJump();
-            }
-        }
-    }
-
-    private void UpdateCursorEnergy(double delta, Vec2 pointerOverlay)
-    {
-        if (delta > 0)
-        {
-            double speed = (pointerOverlay - _lastFramePointer).Length / delta;
-            double normalized = Math.Clamp(speed / CursorEnergyReferenceSpeed, 0, 1);
-            double smoothing = Math.Clamp(delta / EnergySmoothingSeconds, 0, 1);
-            _cursorEnergy += (normalized - _cursorEnergy) * smoothing;
-        }
-
-        _lastFramePointer = pointerOverlay;
-        _behaviorTuning = CharacterBehaviorTuning.ForEnergy(_behaviorIntensity, _cursorEnergy);
-    }
-
-    private Vec2 NeutralGazeTarget() => new(
-        _physics.Position.X + (_physics.Size.Width / 2),
-        _physics.Position.Y + (_physics.Size.Height * 0.25));
-
-    private void UpdateCrouchAmount(double delta)
-    {
-        if (_stateMachine.Current == CharacterState.Sit)
-        {
-            _crouchAmount = 1;
-            _crouchTransitionElapsed = double.PositiveInfinity;
-            return;
-        }
-
-        if (_crouchTransitionElapsed >= CrouchTransitionDuration)
-        {
-            _crouchAmount = 0;
-            return;
-        }
-
-        _crouchTransitionElapsed += delta;
-        double t = Math.Clamp(_crouchTransitionElapsed / CrouchTransitionDuration, 0, 1);
-        _crouchAmount = _crouchTransitionStart * (1 - t);
-    }
-
-    /// <summary>Eases the renderer's arm pose toward "climbing" while in <see
-    /// cref="CharacterState.Climb"/> and back toward the normal pose otherwise, so entering
-    /// or leaving a climb cross-fades the limbs instead of swapping poses on a single frame.</summary>
-    private void UpdateClimbAmount(double delta)
-    {
-        if (_stateMachine.Current is CharacterState.Walk or CharacterState.Run)
-        {
-            // Once the character is actively walking/running again (e.g. it lands off a
-            // climb and immediately resumes fleeing), the stride animation takes over the
-            // arms on its own — continuing the usual ClimbPoseBlendSeconds fade-out at the
-            // same time would have the arms blending toward a now-stale climbWallLineX
-            // while the stride's own oscillation is simultaneously swinging them for
-            // walking, the two fighting over the same arm position for the whole fade and
-            // reading as the arms twitching/pawing at the air where the wall used to be.
-            // Idle keeps the graceful fade (nothing else is competing for the arms there).
-            _climbAmount = 0;
-            return;
-        }
-
-        double target = _stateMachine.Current == CharacterState.Climb ? 1 : 0;
-        double step = delta / ClimbPoseBlendSeconds;
-        _climbAmount = target > _climbAmount
-            ? Math.Min(target, _climbAmount + step)
-            : Math.Max(target, _climbAmount - step);
-    }
-
-    /// <summary>Eases the hide pose's rotation and slide-in position toward 1 over <see
-    /// cref="HidePoseBlendSeconds"/> instead of popping into the rotated peek stance and
-    /// final tucked position on a single frame.</summary>
-    private void UpdateHideAmount(double delta)
-    {
-        double target = _stateMachine.Current == CharacterState.Hide ? 1 : 0;
-        double step = delta / HidePoseBlendSeconds;
-        _hideAmount = target > _hideAmount
-            ? Math.Min(target, _hideAmount + step)
-            : Math.Max(target, _hideAmount - step);
-    }
-
-    private DesktopPlatform? FollowAttachedPlatform(PlatformSnapshot snapshot)
-    {
-        bool attached = _platformController.TryFollow(
-            snapshot,
-            _physics,
-            _stateMachine,
-            out DesktopPlatform? platform,
-            out string? lostPlatform);
-        if (lostPlatform is not null)
-        {
-            _currentPlatformId = null;
-            _logger.Write("character_platform_lost", new { platform = lostPlatform });
-        }
-
-        _currentPlatformId = attached ? platform!.Id : _currentPlatformId;
-        return attached ? platform : null;
-    }
-
-    private (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) GetHorizontalBoundaries(
-        DesktopPlatform? attachedPlatform,
-        PlatformSnapshot snapshot)
-    {
-        if (attachedPlatform is not null)
-        {
-            PlatformSegment? segment = _attachment.FindSupportingSegment(
-                attachedPlatform,
-                _physics.Bounds);
-            if (segment is not null)
-            {
-                const double footWidthRatio = 0.42;
-                double overhang = (_physics.Size.Width - (_physics.Size.Width * footWidthRatio)) / 2;
-
-                // A different window standing in the way is a wall too, and must stop
-                // horizontal motion at its own edge even if the walked-on platform's
-                // (occlusion-clipped) surface segment would technically continue past it.
-                WallEncounterDetector.Neighbors neighbors = WallEncounterDetector.FindNeighborWalls(
-                    attachedPlatform,
-                    _physics.Bounds,
-                    snapshot.Platforms);
-                return WithScreenEdgeFallback(
-                    ClampToNeighborWalls(segment.Value.Left - overhang, segment.Value.Right + overhang, neighbors));
-            }
-        }
-
-        // No attached window means the character is walking the bare desktop floor — but a
-        // window can still be sitting squarely in its path there, and must stop it exactly
-        // like a neighbor window would while perched on top of a different platform.
-        (_, double workLeft, double workRight) = GetCurrentWorkArea();
-        WallEncounterDetector.Neighbors floorNeighbors = WallEncounterDetector.FindNeighborWalls(
-            CreateDesktopPlatform(),
-            _physics.Bounds,
-            snapshot.Platforms);
-        return WithScreenEdgeFallback(ClampToNeighborWalls(workLeft, workRight, floorNeighbors));
-    }
-
-    /// <summary>When neither a real platform edge nor a neighbor window constrains a side,
-    /// the boundary is the literal edge of the monitor's work area — substitute the
-    /// synthetic screen-edge wall there so walking into it offers the same climb/bounce
-    /// reaction as walking into a window, instead of just silently stopping.</summary>
-    private (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) WithScreenEdgeFallback(
-        (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) bounds)
-    {
-        (_, double workLeft, double workRight) = GetCurrentWorkArea();
-        DesktopPlatform? leftWall = bounds.LeftWall;
-        DesktopPlatform? rightWall = bounds.RightWall;
-        double left = bounds.Left;
-        double right = bounds.Right;
-        if (leftWall is null && left <= workLeft + 0.5)
-        {
-            leftWall = CreateScreenEdgePlatform(isLeftEdge: true);
-        }
-
-        if (rightWall is null && right >= workRight - 0.5)
-        {
-            rightWall = CreateScreenEdgePlatform(isLeftEdge: false);
-        }
-
-        // A window's own surface can extend past the monitor's work area (dragged so it
-        // hangs off the side) — a segment sitting on top of it must still stop walking at
-        // the real screen edge instead of continuing onto the off-screen portion, or the
-        // character can walk clean off the visible desktop and only snap back once
-        // something else re-clamps it (reading as a sudden teleport).
-        if (left < workLeft)
-        {
-            left = workLeft;
-        }
-
-        if (right > workRight)
-        {
-            right = workRight;
-        }
-
-        return (left, right, leftWall, rightWall);
-    }
-
-    private RectD GetCurrentScreenBounds()
-    {
-        (double floor, double left, double right) = GetCurrentWorkArea();
-        double top = GetCurrentMonitorTop();
-        return new RectD(left, top, right - left, floor - top);
-    }
-
-    private DesktopPlatform CreateScreenEdgePlatform(bool isLeftEdge)
-    {
-        (double floor, double workLeft, double workRight) = GetCurrentWorkArea();
-        double top = GetCurrentMonitorTop();
-        const double thickness = 2;
-        double edgeX = isLeftEdge ? workLeft : workRight;
-        double left = isLeftEdge ? edgeX - thickness : edgeX;
-        return new DesktopPlatform
-        {
-            Id = isLeftEdge ? LeftScreenEdgeId : RightScreenEdgeId,
-            Kind = PlatformKind.ScreenEdge,
-            Bounds = new RectD(left, top, thickness, floor - top),
-            Segments = [new PlatformSegment(left, left + thickness, top)],
-            ZOrder = int.MaxValue,
-            MonitorId = "screen-edge",
-            MonitorTop = top,
-            UpdatedAt = DateTimeOffset.UtcNow,
-        };
-    }
-
-    private List<DesktopPlatform> WithScreenEdges(ImmutableArray<DesktopPlatform> platforms)
-    {
-        var combined = new List<DesktopPlatform>(platforms.Length + 2);
-        combined.AddRange(platforms);
-        combined.Add(CreateScreenEdgePlatform(isLeftEdge: true));
-        combined.Add(CreateScreenEdgePlatform(isLeftEdge: false));
-        return combined;
-    }
-
-    private static (double Left, double Right, DesktopPlatform? LeftWall, DesktopPlatform? RightWall) ClampToNeighborWalls(
-        double left,
-        double right,
-        WallEncounterDetector.Neighbors neighbors)
-    {
-        DesktopPlatform? leftWall = null;
-        DesktopPlatform? rightWall = null;
-        if (neighbors.Left is { } leftNeighbor && leftNeighbor.Boundary > left)
-        {
-            left = leftNeighbor.Boundary;
-            leftWall = leftNeighbor.Platform;
-        }
-
-        if (neighbors.Right is { } rightNeighbor && rightNeighbor.Boundary < right)
-        {
-            right = rightNeighbor.Boundary;
-            rightWall = rightNeighbor.Platform;
-        }
-
-        return (left, right, leftWall, rightWall);
-    }
-
-    private DesktopPlatform CreateDesktopPlatform()
-    {
-        (double floor, double left, double right) = GetCurrentWorkArea();
-        return new DesktopPlatform
-        {
-            Id = "desktop:work-area",
-            Kind = PlatformKind.Desktop,
-            Bounds = new RectD(left, floor, right - left, 1),
-            Segments = [new PlatformSegment(left, right, floor)],
-            ZOrder = int.MaxValue,
-            MonitorId = "work-area",
-            MonitorTop = GetCurrentMonitorTop(),
-            UpdatedAt = DateTimeOffset.UtcNow,
-        };
-    }
-
-    private void LosePlatformSupport()
-    {
-        if (!_attachment.IsAttached)
-        {
-            return;
-        }
-
-        string? lostPlatform = _attachment.PlatformId;
-        // Support usually disappears because the platform itself moved/shrank/closed. But if
-        // some other window now overlaps right where the character is standing, it got
-        // covered instead — a startled little hop reads much better than silently vanishing
-        // underneath whatever just slid over it.
-        bool covered = _windowPlatforms.Snapshot.Platforms.Any(platform =>
-            platform.Kind == PlatformKind.Window &&
-            platform.Id != lostPlatform &&
-            platform.Bounds.Intersects(_physics.Bounds));
-        _attachment.Detach();
-        _currentPlatformId = null;
-        _stateMachine.Send(CharacterSignal.SupportLost);
-        if (covered)
-        {
-            _physics.Nudge(new Vec2(_physics.Velocity.X, -CoveredHopSpeed));
-            _logger.Write("character_covered_by_window", new { platform = lostPlatform });
-        }
-        else
-        {
-            _logger.Write("character_platform_lost", new { platform = lostPlatform });
-        }
     }
 
     private (RectD OverlayBounds, RectD VirtualBounds) GetCoordinateSpace()
@@ -1297,9 +324,8 @@ internal sealed class OverlayForm : Form
             return;
         }
 
-        bool overCharacter = GetInteractiveBounds().Inflate(8, 8).Contains(
-            new Vec2(clientPointer.X, clientPointer.Y));
-        bool shouldClickThrough = !_isHolding && !overCharacter;
+        bool overCharacter = _simulation.HitTest(new Vec2(clientPointer.X, clientPointer.Y));
+        bool shouldClickThrough = !_simulation.IsHeld && !overCharacter;
         if (shouldClickThrough == _clickThrough)
         {
             return;
@@ -1309,75 +335,30 @@ internal sealed class OverlayForm : Form
         NativeWindowStyles.SetClickThrough(Handle, shouldClickThrough);
     }
 
-    private (double Floor, double Left, double Right) GetCurrentWorkArea()
+    /// <summary>`TopMost = true` (set once, at construction) only reflects WinForms' own
+    /// cached intent — it doesn't mean the window is pinned there forever. Another
+    /// application asserting its own topmost status can push this window back in the real
+    /// Win32 z-order without WinForms ever finding out, so the character keeps simulating
+    /// fine but silently stops being drawn on top of anything — reported by the user as "the
+    /// character just vanished while running around", fixed only by toggling the tray
+    /// visibility item (which happens to call BringToFront). Re-asserting HWND_TOPMOST
+    /// directly on an interval, regardless of what the cached property claims, is the actual
+    /// fix instead of relying on the user noticing and toggling it back manually.</summary>
+    private void ReassertTopMostPeriodically(double delta)
     {
-        Rectangle workArea = Screen.FromPoint(CharacterCenter()).WorkingArea;
-        return (
-            workArea.Bottom - Bounds.Top,
-            workArea.Left - Bounds.Left,
-            workArea.Right - Bounds.Left);
-    }
-
-    private double GetCurrentMonitorTop() =>
-        Screen.FromPoint(CharacterCenter()).Bounds.Top - Bounds.Top;
-
-    /// <summary>The area that actually reads as "the character" for click/hover purposes.
-    /// While hiding, most of <see cref="CharacterPhysics.Bounds"/> is empty air — only the
-    /// head is drawn — so hit-testing the full body would grab/click-block on nothing
-    /// visible.</summary>
-    private RectD GetInteractiveBounds()
-    {
-        if (_stateMachine.Current != CharacterState.Hide)
+        if (!IsHandleCreated)
         {
-            return _physics.Bounds;
+            return;
         }
 
-        double headSize = _physics.Size.Width * 0.52;
-        return new RectD(_physics.Position.X, _physics.Position.Y, _physics.Size.Width, headSize);
-    }
-
-    private Point CharacterCenter() => new(
-        Bounds.Left + (int)(_physics.Position.X + (_physics.Size.Width / 2)),
-        Bounds.Top + (int)(_physics.Position.Y + (_physics.Size.Height / 2)));
-
-    private void PositionAtPrimaryScreen()
-    {
-        Rectangle work = Screen.PrimaryScreen?.WorkingArea ?? SystemInformation.WorkingArea;
-        var start = new Vec2(
-            work.Left - Bounds.Left + ((work.Width - _physics.Size.Width) / 2),
-            work.Top - Bounds.Top + 30);
-        _physics.HoldAt(start + new Vec2(_physics.Size.Width / 2, _physics.Size.Height / 2));
-        _physics.Release(Vec2.Zero);
-    }
-
-    private void OnStateChanged(
-        CharacterState previous,
-        CharacterState current,
-        CharacterSignal signal)
-    {
-        _stateTime = 0;
-        if (signal == CharacterSignal.Landed)
+        _topMostReassertSeconds += delta;
+        if (_topMostReassertSeconds < TopMostReassertIntervalSeconds)
         {
-            _crouchTransitionStart = 0.6;
-            _crouchTransitionElapsed = 0;
-        }
-        else if (previous == CharacterState.Sit && current != CharacterState.Sit)
-        {
-            _crouchTransitionStart = 1;
-            _crouchTransitionElapsed = 0;
+            return;
         }
 
-        if (current == CharacterState.Fall && previous != CharacterState.Fall)
-        {
-            _jumpGrabAttempted = false;
-        }
-
-        _logger.Write("character_state_changed", new
-        {
-            previous = previous.ToString(),
-            current = current.ToString(),
-            signal = signal.ToString(),
-        });
+        _topMostReassertSeconds = 0;
+        NativeWindowStyles.ForceTopMost(Handle);
     }
 
     private void UpdateFps(double delta)
@@ -1440,21 +421,24 @@ internal sealed class OverlayForm : Form
                 (float)bounds.Y - labelSize.Height);
         }
 
-        (double footLeft, double footRight) = _collisionResolver.GetFootInterval(_physics.Bounds);
+        CharacterDiagnostics diagnostics = _simulation.Diagnostics();
         using var footPen = new Pen(Color.LimeGreen, 4);
         graphics.DrawLine(
             footPen,
-            (float)footLeft,
-            (float)_physics.Bounds.Bottom,
-            (float)footRight,
-            (float)_physics.Bounds.Bottom);
+            (float)diagnostics.FootInterval.Left,
+            (float)diagnostics.Body.Bottom,
+            (float)diagnostics.FootInterval.Right,
+            (float)diagnostics.Body.Bottom);
 
-        if (_attachment.IsAttached)
+        if (diagnostics.AttachmentFootCenterX is { } attachmentX)
         {
             using var attachmentBrush = new SolidBrush(Color.HotPink);
-            float x = (float)(_attachment.LastPlatformBounds.X + _attachment.RelativeFootCenterX);
-            float y = (float)_physics.Bounds.Bottom;
-            graphics.FillEllipse(attachmentBrush, x - 5, y - 5, 10, 10);
+            graphics.FillEllipse(
+                attachmentBrush,
+                (float)attachmentX - 5,
+                (float)diagnostics.Body.Bottom - 5,
+                10,
+                10);
         }
     }
 
@@ -1466,31 +450,79 @@ internal sealed class OverlayForm : Form
         using var text = new SolidBrush(Color.White);
         graphics.FillRectangle(background, 14, 14, width, height);
 
+        CharacterDiagnostics diagnostics = _simulation.Diagnostics();
         string details =
             $"DesktopPeople • DEBUG\n" +
             $"FPS: {_fps:F0}\n" +
-            $"State: {_stateMachine.Current}\n" +
-            $"Velocity: {_physics.Velocity.X:F0}, {_physics.Velocity.Y:F0}\n" +
-            $"Platform: {_currentPlatformId ?? "none"}\n" +
-            $"Windows: {_windowPlatforms.Snapshot.Platforms.Length}\n" +
-            $"Attached: {_attachment.IsAttached}\n" +
-            $"Sweep Y: {_previousBottom:F0} → {_currentBottom:F0}\n" +
+            $"State: {diagnostics.State}\n" +
+            $"Velocity: {diagnostics.Velocity.X:F0}, {diagnostics.Velocity.Y:F0}\n" +
+            $"Platform: {diagnostics.CurrentPlatformId ?? "none"}\n" +
+            $"Windows: {diagnostics.PlatformCount}\n" +
+            $"Attached: {diagnostics.IsAttached}\n" +
             $"Mouse: {_lastMouseEvent}\n" +
-            $"Intensity: {_behaviorIntensity}  Energy: {_cursorEnergy:F2}\n" +
-            $"Harassment: {_harassment.Level:F1}  Fleeing: {_isFleeing}\n" +
-            $"Climbing: {_wallClimb.IsClimbing}  Hiding: {_hidingPlatformId ?? "-"}\n" +
-            $"Scale: {_characterScale:F2}\n" +
-            $"Clip: {_stateMachine.Current.ToString().ToLowerInvariant()}";
+            $"Intensity: {diagnostics.BehaviorIntensity}  Energy: {diagnostics.CursorEnergy:F2}\n" +
+            $"Harassment: {diagnostics.HarassmentLevel:F1}  Fleeing: {diagnostics.IsFleeing}\n" +
+            $"Climbing: {diagnostics.IsClimbing}  Hiding: {diagnostics.HidingPlatformId ?? "-"}\n" +
+            $"Scale: {diagnostics.CharacterScale:F2}";
         graphics.DrawString(details, Font, text, new RectangleF(26, 24, width - 20, height - 16));
 
         using var hitbox = new Pen(Color.LimeGreen, 1);
-        RectD bounds = GetInteractiveBounds();
+        RectD interactive = _simulation.InteractiveBounds;
         graphics.DrawRectangle(
             hitbox,
-            (float)bounds.X,
-            (float)bounds.Y,
-            (float)bounds.Width,
-            (float)bounds.Height);
+            (float)interactive.X,
+            (float)interactive.Y,
+            (float)interactive.Width,
+            (float)interactive.Height);
     }
 #endif
+}
+
+/// <summary>Maps WinForms' screen APIs into the overlay-relative coordinates the simulation
+/// works in. Calling <c>Screen.FromPoint</c> from the middle of the physics loop is exactly
+/// what used to make that logic impossible to test outside a live window.</summary>
+internal sealed class WinFormsScreenGeometry(Func<Rectangle> overlayBounds) : IScreenGeometry
+{
+    public RectD VirtualBounds
+    {
+        get
+        {
+            Rectangle virtualScreen = SystemInformation.VirtualScreen;
+            Rectangle overlay = overlayBounds();
+            return new RectD(
+                virtualScreen.X - overlay.Left,
+                virtualScreen.Y - overlay.Top,
+                virtualScreen.Width,
+                virtualScreen.Height);
+        }
+    }
+
+    public int MonitorCount => Screen.AllScreens.Length;
+
+    public RectD WorkAreaAt(Vec2 overlayPoint) =>
+        ToOverlay(Screen.FromPoint(ToScreen(overlayPoint)).WorkingArea);
+
+    public double MonitorTopAt(Vec2 overlayPoint) =>
+        Screen.FromPoint(ToScreen(overlayPoint)).Bounds.Top - overlayBounds().Top;
+
+    public RectD PrimaryWorkArea =>
+        ToOverlay(Screen.PrimaryScreen?.WorkingArea ?? SystemInformation.WorkingArea);
+
+    private Point ToScreen(Vec2 overlayPoint)
+    {
+        Rectangle overlay = overlayBounds();
+        return new Point(
+            overlay.Left + (int)overlayPoint.X,
+            overlay.Top + (int)overlayPoint.Y);
+    }
+
+    private RectD ToOverlay(Rectangle screenRect)
+    {
+        Rectangle overlay = overlayBounds();
+        return new RectD(
+            screenRect.Left - overlay.Left,
+            screenRect.Top - overlay.Top,
+            screenRect.Width,
+            screenRect.Height);
+    }
 }

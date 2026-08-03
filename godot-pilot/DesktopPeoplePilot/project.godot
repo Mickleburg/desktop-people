@@ -1,0 +1,47 @@
+; Engine configuration file.
+; Pilot spike for the 3b Godot migration scoping (see docs/DECISIONS.md, ADR-001 and
+; docs/ROADMAP.md, "Инкремент 3b"). Validates: transparent + per-pixel window, selective
+; mouse click-through, and DesktopPeople.Windows/DesktopPeople.Core referenced unmodified
+; from a Godot C# project. Not part of the shipping app.
+
+config_version=5
+
+[application]
+
+config/name="DesktopPeoplePilot"
+config/features=PackedStringArray("4.7", "C#")
+run/main_scene="res://Main.tscn"
+boot_splash/bg_color=Color(0, 0, 0, 0)
+boot_splash/show_image=false
+
+[dotnet]
+
+project/assembly_name="DesktopPeoplePilot"
+
+[display]
+
+; Deliberately ONE PIXEL SHORTER than this machine's native 1920x1200. A borderless
+; window at exactly the native resolution gets promoted to fullscreen-exclusive by
+; Windows, and fullscreen drops per-pixel transparency to opaque black — the exact
+; symptom seen here. Shrinking by a pixel keeps it a normal windowed surface, which is
+; the documented workaround. The real app will need the same treatment (or an explicit
+; windowed-mode assertion) rather than sizing exactly to the screen.
+window/size/viewport_width=1920
+window/size/viewport_height=1199
+window/size/mode=0
+window/size/transparent=true
+window/size/borderless=true
+window/size/always_on_top=true
+window/per_pixel_transparency/allowed=true
+window/energy_saving/keep_screen_on=false
+window/vsync/vsync_mode=0
+
+[rendering]
+
+; Forward+ (Vulkan, the Godot 4 default) has broken per-pixel window
+; transparency on Windows — the transparent flag is honored but the window
+; composites as solid opaque black instead (confirmed against this exact
+; symptom via godotengine/godot#103456, #89205, #65487). The Compatibility
+; (GLES3) renderer is the one with working transparency for this desktop-
+; overlay use case; there is no forward_plus workaround short of this.
+renderer/rendering_method="gl_compatibility"

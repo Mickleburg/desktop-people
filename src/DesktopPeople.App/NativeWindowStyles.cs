@@ -15,6 +15,7 @@ internal static partial class NativeWindowStyles
     private const uint SwpNoZOrder = 0x0004;
     private const uint SwpNoActivate = 0x0010;
     private const uint SwpFrameChanged = 0x0020;
+    private static readonly nint HwndTopMost = new(-1);
 
     [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static partial nint GetWindowLongPtr(nint window, int index);
@@ -53,5 +54,16 @@ internal static partial class NativeWindowStyles
             0,
             SwpNoSize | SwpNoMove | SwpNoZOrder | SwpNoActivate | SwpFrameChanged);
     }
+
+    /// <summary>Re-applies HWND_TOPMOST directly through Win32 instead of relying on
+    /// WinForms' <c>Form.TopMost</c> property. That property only calls SetWindowPos when
+    /// its own cached bool actually changes — it has no way to notice another application
+    /// asserting its own topmost status and pushing this window back in the z-order, so once
+    /// that happens the property stays "true" while the real window sits behind whatever
+    /// shoved past it, and the character reads as having vanished even though the process is
+    /// still running fine. Calling this unconditionally on an interval (regardless of what
+    /// the cached property says) is the only way to recover from that.</summary>
+    public static void ForceTopMost(nint handle) =>
+        SetWindowPos(handle, HwndTopMost, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
 }
 

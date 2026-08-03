@@ -5,6 +5,7 @@ TestCase[] tests =
     .. LegacyTests.All,
     .. PlatformCoreTests.All,
     .. WindowAdapterTests.All,
+    .. CharacterSimulationTests.All,
 ];
 
 int failures = 0;

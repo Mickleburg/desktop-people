@@ -1,8 +1,9 @@
 using System.Text.Json;
+using DesktopPeople.Core;
 
 namespace DesktopPeople.App;
 
-internal sealed class JsonLineLogger
+internal sealed class JsonLineLogger : IOverlayLogger
 {
     private readonly object _gate = new();
     private readonly string _logPath;

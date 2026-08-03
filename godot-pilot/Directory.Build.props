@@ -1,0 +1,11 @@
+<Project>
+  <!-- Isolates this pilot spike from the main solution's strict Directory.Build.props
+       (TreatWarningsAsErrors, etc.) — MSBuild stops walking up at the first
+       Directory.Build.props it finds, so this one intentionally does not import the
+       repo-root one. The pilot is throwaway/experimental; it should not be held to, or
+       accidentally affect, the shipped app's build settings. -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
