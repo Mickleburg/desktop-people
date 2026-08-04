@@ -86,9 +86,15 @@ internal sealed class GodotScreenGeometry(Func<Vector2I> overlayOrigin) : IScree
     }
 }
 
-/// <summary>Routes the simulation's structured events into Godot's own output.</summary>
-internal sealed class GodotLogger : IOverlayLogger
+/// <summary>Routes the host's and the simulation's structured events into Godot's own output
+/// and, when given one, into a file as well. Both matter and for different reasons: the console
+/// is what you watch while running from the editor, the file is what still exists tomorrow when
+/// the user reports that the character did something strange an hour ago.</summary>
+internal sealed class GodotLogger(IOverlayLogger? file = null) : IOverlayLogger
 {
-    public void Write(string eventName, object? data = null) =>
-        GD.Print(data is null ? $"[sim] {eventName}" : $"[sim] {eventName} {data}");
+    public void Write(string eventName, object? data = null)
+    {
+        GD.Print(data is null ? $"[log] {eventName}" : $"[log] {eventName} {data}");
+        file?.Write(eventName, data);
+    }
 }

@@ -30,6 +30,13 @@ public sealed partial class OverlayNode : Control
     private readonly GodotCharacterRenderer _renderer = new();
     private CharacterSimulation? _simulation;
     private WindowsWindowPlatformProvider? _windowPlatforms;
+    private TrayIcon? _tray;
+    private LauncherWindow? _launcher;
+    private long _launcherHandle;
+    private SettingsStore? _settingsStore;
+    private AppSettings _settings = new();
+    private IOverlayLogger _logger = new GodotLogger();
+    private bool _characterVisible = true;
     private Vector2I _overlayOrigin;
     private nint _handle;
     private double _topMostReassertSeconds;
@@ -88,6 +95,8 @@ public sealed partial class OverlayNode : Control
         _handle = (nint)DisplayServer.WindowGetNativeHandle(DisplayServer.HandleType.WindowHandle);
         ApplyOverlayWindowStyles();
 
+        _logger = CreateLogger();
+
         var registry = new PlatformRegistry();
         _windowPlatforms = new WindowsWindowPlatformProvider(
             new Win32WindowApi(),
@@ -97,16 +106,138 @@ public sealed partial class OverlayNode : Control
         _windowPlatforms.SetExplicitlyExcludedHandles([_handle.ToInt64()]);
 
         _simulation = new CharacterSimulation(
-            new GodotLogger(),
+            _logger,
             _windowPlatforms,
             new GodotScreenGeometry(() => _overlayOrigin));
 
         RectD overlayBounds = OverlayScreenBounds();
         _simulation.Start(overlayBounds, VirtualScreenBounds());
-        GetWindowRect(_handle, out Rect r);
-        GD.Print($"[host] started. godotSize={window.Size} osRect={r.Left},{r.Top}..{r.Right},{r.Bottom} " +
-            $"screen={DisplayServer.ScreenGetSize()} usable={DisplayServer.ScreenGetUsableRect()}");
+        LoadSettings();
+        CreateLauncher();
+        _tray = new TrayIcon(_characterVisible, _simulation.IsPaused, _simulation.BehaviorIntensity);
+        _logger.Write("tray_created", new { status = _tray.Status });
+
+        // Kept because its absence once cost a wrong conclusion: without the OS's own idea of
+        // this window's rectangle beside Godot's, a DPI-scaling bug looked like a physics one.
+        GetWindowRect(_handle, out Rect rect);
+        _logger.Write("host_started", new
+        {
+            godot_size = window.Size.ToString(),
+            os_rect = $"{rect.Left},{rect.Top}..{rect.Right},{rect.Bottom}",
+            screen = DisplayServer.ScreenGetSize().ToString(),
+            usable = DisplayServer.ScreenGetUsableRect().ToString(),
+        });
     }
+
+    /// <summary>The character is deliberately not on the desktop yet: as in the WinForms host,
+    /// it appears only once the user asks for it here. Starting the application should not put
+    /// something on someone's screen before they have said go.</summary>
+    private void CreateLauncher()
+    {
+        _characterVisible = false;
+        _launcher = new LauncherWindow();
+        AddChild(_launcher);
+
+        _launcher.SelectedIntensity = _settings.BehaviorIntensity;
+        _launcher.SelectedScalePercent = (int)Math.Round(_settings.CharacterScale * 100);
+        _launcher.ReleaseRequested += () =>
+        {
+            _characterVisible = true;
+            Save(_settings with { CharactersVisible = true });
+            _tray?.SyncState(true, _simulation!.IsPaused, _simulation.BehaviorIntensity);
+            _launcher.Hide();
+            _logger.Write("character_released");
+        };
+
+        _launcher.IntensityChanged += intensity =>
+        {
+            SetIntensity(intensity);
+            _tray?.SyncState(_characterVisible, _simulation!.IsPaused, intensity);
+        };
+
+        _launcher.ScaleChanged += percent =>
+        {
+            double scale = percent / 100.0;
+            _simulation!.CharacterScale = scale;
+            Save(_settings with { CharacterScale = scale });
+        };
+
+        ShowLauncher();
+    }
+
+    private void ShowLauncher()
+    {
+        if (_launcher is null)
+        {
+            return;
+        }
+
+        // Centred only the first time. Reopening a window the user has since moved should put
+        // it back where they left it, like any other application window.
+        bool firstTime = _launcherHandle == 0;
+        _launcher.Show();
+        if (firstTime)
+        {
+            _launcher.MoveToCenter();
+        }
+
+        _launcher.GrabFocus();
+        TrackLauncherWindow();
+
+        // Recorded because an embedded launcher is a silent failure: it renders inside the
+        // transparent click-through overlay instead of being its own window, and then behaves
+        // like neither.
+        _logger.Write("launcher_shown", new
+        {
+            embedded = _launcher.IsEmbedded(),
+            handle = _launcherHandle,
+        });
+    }
+
+    /// <summary>Names the launch window explicitly among the handles the character ignores. The
+    /// platform provider already skips every window of this process, so today this changes
+    /// nothing — it is here so that the launcher stays excluded on its own merits if that
+    /// process-wide rule is ever relaxed. The handle is re-read rather than captured once
+    /// because Godot creates and destroys the OS window as it is shown and hidden.</summary>
+    private void TrackLauncherWindow()
+    {
+        if (_launcher is null || _windowPlatforms is null || !_launcher.Visible)
+        {
+            return;
+        }
+
+        long handle = DisplayServer.WindowGetNativeHandle(
+            DisplayServer.HandleType.WindowHandle, _launcher.GetWindowId());
+        if (handle == _launcherHandle)
+        {
+            return;
+        }
+
+        _launcherHandle = handle;
+        _windowPlatforms.SetExplicitlyExcludedHandles([_handle.ToInt64(), handle]);
+    }
+
+    /// <summary>Logs to Godot's console and to the same folder the WinForms host uses, under its
+    /// own file name so the two can run at once without fighting over one file.</summary>
+    private static IOverlayLogger CreateLogger()
+    {
+        try
+        {
+            return new GodotLogger(new JsonLineLogger(Path.Combine(DataDirectory(), "logs"), "godot"));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Being unable to create the log folder is a reason to log less, not to refuse to
+            // start: the character is the point, the diagnostics are not.
+            var console = new GodotLogger();
+            console.Write("file_logging_unavailable", new { error = exception.Message });
+            return console;
+        }
+    }
+
+    private static string DataDirectory() => Path.Combine(
+        System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+        "DesktopPeople");
 
     public override void _Process(double delta)
     {
@@ -114,6 +245,9 @@ public sealed partial class OverlayNode : Control
         {
             return;
         }
+
+        DrainTrayCommands();
+        TrackLauncherWindow();
 
         _elapsedSeconds += delta;
         ReassertTopMostPeriodically(delta);
@@ -123,15 +257,117 @@ public sealed partial class OverlayNode : Control
         _windowPlatforms.Pump(DateTimeOffset.UtcNow, OverlayScreenBounds(), VirtualScreenBounds());
 
         Vec2 pointer = PollPointer();
-        _simulation.Update(delta, pointer, visible: true);
+        _simulation.Update(delta, pointer, visible: _characterVisible);
 
         UpdateClickThrough();
         QueueRedraw();
     }
 
+    /// <summary>Applies whatever the tray menu asked for. The menu runs on its own thread, so
+    /// the work lands here, on Godot's, where the simulation and the window may be touched.</summary>
+    private void DrainTrayCommands()
+    {
+        while (_tray is not null && _tray.TryDequeue(out TrayCommand command))
+        {
+            Apply(command);
+        }
+    }
+
+    private void Apply(TrayCommand command)
+    {
+        _logger.Write("tray_command", new { command = command.ToString() });
+        switch (command)
+        {
+            case TrayCommand.OpenLauncher:
+                ShowLauncher();
+                break;
+            case TrayCommand.ShowCharacter:
+                _characterVisible = true;
+                Save(_settings with { CharactersVisible = true });
+                break;
+            case TrayCommand.HideCharacter:
+                _characterVisible = false;
+                Save(_settings with { CharactersVisible = false });
+                break;
+            case TrayCommand.Pause:
+                _simulation!.IsPaused = true;
+                Save(_settings with { IsPaused = true });
+                break;
+            case TrayCommand.Resume:
+                _simulation!.IsPaused = false;
+                Save(_settings with { IsPaused = false });
+                break;
+            case TrayCommand.IntensityCalm:
+                SetIntensity("calm");
+                break;
+            case TrayCommand.IntensityNormal:
+                SetIntensity("normal");
+                break;
+            case TrayCommand.IntensityActive:
+                SetIntensity("active");
+                break;
+            case TrayCommand.Quit:
+                GetTree().Quit();
+                break;
+        }
+    }
+
+    private void SetIntensity(string intensity)
+    {
+        _simulation!.BehaviorIntensity = intensity;
+        Save(_settings with { BehaviorIntensity = intensity });
+    }
+
+    /// <summary>Restores what the user chose last time, from the same file the WinForms host
+    /// writes — both are the same application as far as the user is concerned.
+    /// <para>
+    /// Visibility is deliberately not restored. The WinForms host never shows the character on
+    /// its own either; there it is the launcher's "release" button that does. This host has no
+    /// launcher, so starting it IS that request — and honouring a stored "hidden" would leave a
+    /// running overlay with nothing on screen to explain itself.
+    /// </para>
+    /// </summary>
+    private void LoadSettings()
+    {
+        _settingsStore = new SettingsStore(Path.Combine(DataDirectory(), "settings.json"));
+        _settings = _settingsStore.Load();
+        _simulation!.IsPaused = _settings.IsPaused;
+        _simulation.BehaviorIntensity = _settings.BehaviorIntensity;
+        _simulation.CharacterScale = _settings.CharacterScale;
+        _logger.Write("settings_loaded", new
+        {
+            paused = _settings.IsPaused,
+            intensity = _settings.BehaviorIntensity,
+            scale = _settings.CharacterScale,
+        });
+    }
+
+    private void Save(AppSettings settings)
+    {
+        _settings = settings;
+        try
+        {
+            _settingsStore?.Save(settings);
+        }
+        catch (IOException exception)
+        {
+            // A settings file that cannot be written is not worth taking the character down for.
+            _logger.Write("settings_save_failed", new { error = exception.Message });
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            _logger.Write("settings_save_failed", new { error = exception.Message });
+        }
+    }
+
     public override void _Draw()
     {
         if (_simulation is null)
+        {
+            return;
+        }
+
+        if (!_characterVisible)
         {
             return;
         }
@@ -179,7 +415,11 @@ public sealed partial class OverlayNode : Control
         }
     }
 
-    public override void _ExitTree() => _windowPlatforms?.Dispose();
+    public override void _ExitTree()
+    {
+        _tray?.Dispose();
+        _windowPlatforms?.Dispose();
+    }
 
     /// <summary>Restricts mouse input to the character's own silhouette, so every click
     /// elsewhere lands on whatever is actually underneath the overlay.</summary>
@@ -187,6 +427,14 @@ public sealed partial class OverlayNode : Control
     {
         if (_simulation is null)
         {
+            return;
+        }
+
+        // Nothing is drawn while the character is hidden, so the overlay must not swallow a
+        // single click either — it is an invisible full-screen window at that point.
+        if (!_characterVisible)
+        {
+            SetClickThrough(true);
             return;
         }
 

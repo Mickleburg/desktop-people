@@ -1,3 +1,5 @@
+using DesktopPeople.Core;
+
 namespace DesktopPeople.App;
 
 internal static class Program
@@ -20,8 +22,7 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             logger.Write("unhandled_exception", new { error = args.ExceptionObject?.ToString() });
 
-        var settingsStore = new DesktopPeople.Core.SettingsStore(
-            Path.Combine(dataDirectory, "settings.json"));
+        var settingsStore = new SettingsStore(Path.Combine(dataDirectory, "settings.json"));
 
         Application.Run(new DesktopPeopleContext(settingsStore, logger));
     }

@@ -31,6 +31,11 @@ window/per_pixel_transparency/allowed=true
 window/energy_saving/keep_screen_on=false
 window/vsync/vsync_mode=0
 
+; The launcher must be a real OS window. Embedded sub-windows are drawn inside the main
+; viewport, and this one is a transparent, click-through, WS_EX_NOACTIVATE overlay — a launcher
+; living in there would have no keyboard, no taskbar entry and no way to be activated.
+window/subwindows/embed_subwindows=false
+
 [rendering]
 
 ; Forward+ (Vulkan) has broken per-pixel window transparency on Windows — it composites the
