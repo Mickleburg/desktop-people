@@ -17,6 +17,10 @@ internal readonly record struct CharacterPose(
 
 internal sealed class CharacterRenderer
 {
+    /// <summary>How far the climbing pose must have blended in before the character counts as
+    /// gripping the wall rather than still reaching for it.</summary>
+    private const float GripEngagedAmount = 0.95f;
+
     private static readonly Color Ink = Color.FromArgb(41, 45, 62);
     private static readonly Color Accent = Color.FromArgb(111, 92, 255);
     private static readonly Color AccentWarm = Color.FromArgb(255, 125, 94);
@@ -40,14 +44,18 @@ internal sealed class CharacterRenderer
         float strideAmplitude = running ? width * 0.43f : width * 0.28f;
         float bob = locomoting ? (float)(Math.Sin(pose.AnimationTime * cadence) * bobAmplitude) : 0;
         float stride = locomoting ? (float)(Math.Sin(pose.AnimationTime * cadence) * strideAmplitude) : 0;
-        // Gated on `climbing` (the actual state), not just `climbAmount` > 0: the amount
-        // still eases the reach in smoothly as a climb starts, but the oscillation itself
-        // must stop dead the instant climbing ends, or the arms/legs keep pawing at the air
-        // for the whole blend-out — reading as still grabbing at a wall that isn't there.
-        float climbReach = climbing
-            ? (float)(Math.Sin(pose.AnimationTime * cadence) * height * 0.07 * climbAmount)
+        // The alternating grab plays only while the character is actually gripping the wall:
+        // in the Climb state AND with the pose fully blended in. Gating on the state alone was
+        // not enough — for the whole ClimbPoseBlendSeconds cross-fade at each end of a climb
+        // the arms sit somewhere between the walking swing and the grip, and running the
+        // climbing oscillation there is exactly what reads as pawing at the air at the start
+        // and the end of every climb. ClimbAmount also carries the wall contact, so this stops
+        // the cycle as the character transfers sideways onto the ledge at the top too.
+        bool gripping = climbing && climbAmount >= GripEngagedAmount;
+        float climbReach = gripping
+            ? (float)(Math.Sin(pose.AnimationTime * cadence) * height * 0.07)
             : 0;
-        float climbLegCycle = climbing ? (float)Math.Sin(pose.AnimationTime * cadence) : 0;
+        float climbLegCycle = gripping ? (float)Math.Sin(pose.AnimationTime * cadence) : 0;
 
         // The actual wall face being climbed, in the same coordinate space as everything
         // else here — shared by both hands and both legs so all four limbs reach for the

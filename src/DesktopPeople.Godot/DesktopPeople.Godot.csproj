@@ -1,0 +1,10 @@
+<Project Sdk="Godot.NET.Sdk/4.7.1">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>DesktopPeople.GodotHost</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DesktopPeople.Core\DesktopPeople.Core.csproj" />
+    <ProjectReference Include="..\DesktopPeople.Windows\DesktopPeople.Windows.csproj" />
+  </ItemGroup>
+</Project>

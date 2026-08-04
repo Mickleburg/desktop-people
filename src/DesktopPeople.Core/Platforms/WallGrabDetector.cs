@@ -37,10 +37,18 @@ public static class WallGrabDetector
                 continue;
             }
 
+            double edgeX = velocityX > 0 ? platform.Bounds.X : platform.Bounds.Right;
             double distance = velocityX > 0
                 ? platform.Bounds.X - characterBounds.Right
                 : characterBounds.X - platform.Bounds.Right;
             if (distance < -2 || distance > captureDistance || distance >= bestDistance)
+            {
+                continue;
+            }
+
+            // No grabbing an edge that another window is covering — there is nothing visible
+            // there to hold on to.
+            if (!WallEdgeVisibility.IsUsable(platform, edgeX, centerY, platforms))
             {
                 continue;
             }

@@ -39,11 +39,23 @@ public sealed class CharacterWallClimb
 
     public WallSide Side { get; private set; }
 
+    /// <summary>How much of the body is actually against the wall's face: 1 while clinging to
+    /// it, easing to 0 as <see cref="Advance"/> transfers the character sideways onto the ledge
+    /// near the top. Renderers scale the climbing pose by this, because that transfer moves the
+    /// body a full body width away from the wall while the climb is still in progress — with
+    /// the pose left at full strength the limbs went on reaching for a wall the character was
+    /// no longer beside, at both ends of every climb.</summary>
+    public double WallContact { get; private set; }
+
     public void Start(DesktopPlatform platform, WallSide side, Size2 characterSize, RectD? screenBounds = null)
     {
         IsClimbing = true;
         PlatformId = platform.Id;
         Side = side;
+
+        // A climb starts from standing on the platform, so the first Advance begins the ledge
+        // transfer from zero contact; it corrects this on the same frame in any other case.
+        WallContact = 0;
         Retarget(platform, characterSize, screenBounds);
     }
 
@@ -100,15 +112,18 @@ public sealed class CharacterWallClimb
         double y = currentY + deltaY;
         if (y <= _topY)
         {
+            WallContact = 0;
             return new ClimbStep(new Vec2(_ledgeX, _topY), ClimbOutcome.ReachedTop);
         }
 
         if (y >= _bottomY)
         {
+            WallContact = 1;
             return new ClimbStep(new Vec2(_wallX, _bottomY), ClimbOutcome.ReachedBottom);
         }
 
         double blend = Math.Clamp((y - _topY) / LedgeBlendDistance, 0, 1);
+        WallContact = blend;
         double x = _ledgeX + ((_wallX - _ledgeX) * blend);
         return new ClimbStep(new Vec2(x, y), ClimbOutcome.InProgress);
     }

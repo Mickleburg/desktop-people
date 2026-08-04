@@ -1,0 +1,11 @@
+<Project>
+  <!-- Deliberately does NOT import the repo-root Directory.Build.props. MSBuild stops at the
+       first one it finds walking up, so this shields the Godot host from the main solution's
+       TreatWarningsAsErrors/AnalysisLevel settings, which fight the Godot source generators.
+       This project is also intentionally absent from DesktopPeople.slnx so that build.ps1 and
+       test.ps1 keep working on machines without the Godot SDK installed. -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>

@@ -22,6 +22,7 @@ public static class WallEncounterDetector
         Neighbor? right = null;
         double footY = characterBounds.Bottom;
         double centerX = characterBounds.X + (characterBounds.Width / 2);
+        double centerY = characterBounds.Y + (characterBounds.Height / 2);
 
         foreach (DesktopPlatform candidate in platforms)
         {
@@ -35,6 +36,11 @@ public static class WallEncounterDetector
 
             if (candidate.Bounds.Right <= centerX)
             {
+                if (!WallEdgeVisibility.IsUsable(candidate, candidate.Bounds.Right, centerY, platforms))
+                {
+                    continue;
+                }
+
                 if (left is null || candidate.Bounds.Right > left.Value.Boundary)
                 {
                     left = new Neighbor(candidate, candidate.Bounds.Right);
@@ -42,6 +48,11 @@ public static class WallEncounterDetector
             }
             else if (candidate.Bounds.X >= centerX)
             {
+                if (!WallEdgeVisibility.IsUsable(candidate, candidate.Bounds.X, centerY, platforms))
+                {
+                    continue;
+                }
+
                 if (right is null || candidate.Bounds.X < right.Value.Boundary)
                 {
                     right = new Neighbor(candidate, candidate.Bounds.X);

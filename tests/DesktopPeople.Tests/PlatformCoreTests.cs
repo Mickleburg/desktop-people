@@ -41,11 +41,15 @@ internal static class PlatformCoreTests
         new("wall climb reaching the top reports the standing surface", WallClimbReachesTop),
         new("wall climb clings to the requested side", WallClimbPicksSide),
         new("wall climb eases onto the ledge near the top instead of snapping", WallClimbBlendsOntoLedgeNearTop),
+        new("wall climb reports losing contact with the wall across the ledge blend", WallClimbReportsWallContact),
+        new("wall edge covered by a window in front is not usable", WallEdgeCoveredByFrontWindowRejected),
+        new("wall edge is usable where the covering window does not reach", WallEdgeUsableOutsideCoveringWindow),
         new("stepping onto the ledge after reaching the top can be re-attached", ClimbToTopReattachesWithoutThrowing),
         new("wall side resolver picks the platform's own edge from walk direction", WallSideResolverOwnEdge),
         new("wall side resolver picks the encountered wall's near edge", WallSideResolverEncounteredWall),
         new("wall encounter detector finds a neighbor crossing the walking line", WallEncounterFindsNeighborAhead),
         new("wall encounter detector ignores a window that doesn't cross the line", WallEncounterIgnoresNonCrossingWindow),
+        new("wall encounter detector ignores a wall covered by a window in front", WallEncounterIgnoresCoveredWall),
         new("wall grab detector finds an edge within reach while moving toward it", WallGrabFindsEdgeInReach),
         new("wall grab detector ignores an edge outside capture distance", WallGrabIgnoresOutOfReach),
         new("wall grab detector ignores a nearly stationary character", WallGrabIgnoresStationaryCharacter),
@@ -368,6 +372,53 @@ internal static class PlatformCoreTests
         AssertEx.Near(platform.Bounds.Right - 20, atTop.Position.X);
     }
 
+    /// <summary>The ledge blend slides the character a full body width off the wall's face
+    /// while still climbing; renderers scale the climbing pose by this so the limbs stop
+    /// reaching for a wall the body has already left.</summary>
+    private static void WallClimbReportsWallContact()
+    {
+        var climb = new CharacterWallClimb();
+        DesktopPlatform platform = Platform("window:1", 100, 200, 200);
+        climb.Start(platform, WallSide.Right, new Size2(20, 40));
+        double topY = platform.Segments[0].SurfaceY - 40;
+
+        climb.Advance(topY, 40);
+        AssertEx.Near(1, climb.WallContact);
+
+        climb.Advance(topY, 6);
+        AssertEx.True(climb.WallContact > 0);
+        AssertEx.True(climb.WallContact < 1);
+
+        climb.Advance(topY, 0);
+        AssertEx.Near(0, climb.WallContact);
+
+        // Letting go halfway up must leave the grip at full strength, so that climb still
+        // fades out of the pose gracefully instead of snapping the arms down.
+        climb.Advance(topY, 40);
+        climb.Stop();
+        AssertEx.Near(1, climb.WallContact);
+    }
+
+    /// <summary>The overlay paints above every real window, so clinging to an edge that another
+    /// window covers reads as climbing thin air across the middle of whatever is on top.</summary>
+    private static void WallEdgeCoveredByFrontWindowRejected()
+    {
+        DesktopPlatform wall = Platform("window:back", 400, 200, 300, zOrder: 5);
+        DesktopPlatform front = Platform("window:front", 300, 150, 300, zOrder: 1);
+        AssertEx.True(!WallEdgeVisibility.IsUsable(wall, wall.Bounds.X, 220, [wall, front]));
+    }
+
+    private static void WallEdgeUsableOutsideCoveringWindow()
+    {
+        DesktopPlatform wall = Platform("window:back", 400, 200, 300, zOrder: 5);
+        DesktopPlatform front = Platform("window:front", 300, 150, 300, zOrder: 1);
+
+        // Below the covering window's bottom edge, and behind a window that is further back.
+        AssertEx.True(WallEdgeVisibility.IsUsable(wall, wall.Bounds.X, 280, [wall, front]));
+        DesktopPlatform behind = front with { Id = "window:behind", ZOrder = 9 };
+        AssertEx.True(WallEdgeVisibility.IsUsable(wall, wall.Bounds.X, 220, [wall, behind]));
+    }
+
     private static void WallSideResolverOwnEdge()
     {
         AssertEx.Equal(WallSide.Right, WallSideResolver.ForOwnEdge(1));
@@ -391,6 +442,25 @@ internal static class PlatformCoreTests
         AssertEx.Equal("wall", neighbors.Right!.Value.Platform.Id);
         AssertEx.Near(300, neighbors.Right!.Value.Boundary);
         AssertEx.True(neighbors.Left is null);
+    }
+
+    private static void WallEncounterIgnoresCoveredWall()
+    {
+        DesktopPlatform floor = Platform("floor", 0, 100, 400);
+        DesktopPlatform wall = Platform("wall", 300, 50, 40);
+        var character = new RectD(250, 60, 20, 40);
+
+        // Sits in front of the wall and covers its near edge at the character's own height, but
+        // stops above the walking line so it is not itself a neighbour — otherwise this would
+        // pass by finding the covering window instead of finding nothing.
+        DesktopPlatform front = Platform("front", 280, 20, 60, zOrder: -1) with
+        {
+            Bounds = new RectD(280, 20, 60, 70),
+        };
+
+        WallEncounterDetector.Neighbors neighbors = WallEncounterDetector.FindNeighborWalls(
+            floor, character, [floor, wall, front]);
+        AssertEx.True(neighbors.Right is null);
     }
 
     private static void WallEncounterIgnoresNonCrossingWindow()

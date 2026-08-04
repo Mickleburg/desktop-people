@@ -1,0 +1,39 @@
+; Godot host for DesktopPeople (stage 3b). Shares DesktopPeople.Core's CharacterSimulation
+; with the WinForms host — this project owns only window, input and drawing.
+
+config_version=5
+
+[application]
+
+config/name="DesktopPeople"
+config/features=PackedStringArray("4.7", "C#")
+run/main_scene="res://Main.tscn"
+boot_splash/bg_color=Color(0, 0, 0, 0)
+boot_splash/show_image=false
+
+[dotnet]
+
+project/assembly_name="DesktopPeople.Godot"
+
+[display]
+
+; One pixel shorter than a 1920x1200 desktop on purpose: a borderless window at exactly the
+; native resolution gets promoted to fullscreen-exclusive by Windows, and fullscreen drops
+; per-pixel transparency to opaque black. The host re-sizes itself to the real virtual
+; desktop (minus that pixel) at startup; these are only the pre-boot defaults.
+window/size/viewport_width=1920
+window/size/viewport_height=1199
+window/size/mode=0
+window/size/transparent=true
+window/size/borderless=true
+window/size/always_on_top=true
+window/per_pixel_transparency/allowed=true
+window/energy_saving/keep_screen_on=false
+window/vsync/vsync_mode=0
+
+[rendering]
+
+; Forward+ (Vulkan) has broken per-pixel window transparency on Windows — it composites the
+; transparent window as solid black (godotengine/godot#103456, #89205, #65487). Compatibility
+; is the renderer where desktop-overlay transparency actually works.
+renderer/rendering_method="gl_compatibility"

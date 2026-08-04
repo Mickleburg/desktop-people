@@ -189,7 +189,13 @@ public sealed class CharacterSimulation
             _gazeTarget,
             ClimbWallDirection: activeWallSide == WallSide.Left ? 1 : -1,
             HidePeekDirection: activeWallSide == WallSide.Left ? -1 : 1,
-            ClimbAmount: _climbAmount,
+            // Scaled by how much of the body is still against the wall's face. Near the top a
+            // climb eases the character a full body width sideways onto the ledge while the
+            // state is still Climb; at full strength the pose kept the limbs reaching for a
+            // wall that was no longer beside them, which read as pawing at the air at the start
+            // and the end of every climb. Stop() deliberately leaves the last contact value
+            // alone, so letting go mid-wall still fades out gracefully from a full grip.
+            ClimbAmount: _climbAmount * _wallClimb.WallContact,
             HideAmount: _hideAmount,
             HidingWallBounds: HidingWallBounds());
     }
@@ -749,6 +755,39 @@ public sealed class CharacterSimulation
         // different monitor mid-climb (e.g. a push-off) and the clamp should always follow
         // whichever monitor it's actually next to.
         _wallClimb.Retarget(platform, _physics.Size, GetCurrentScreenBounds());
+
+        // The edge being held has to still be on screen. Only the top surfaces are
+        // occlusion-clipped when platforms are built, so without this the character would climb
+        // an edge that another window covers — and because the overlay paints above every real
+        // window, that reads as climbing thin air up the middle of whatever is on top.
+        double edgeX = _wallClimb.Side == WallSide.Left ? platform.Bounds.X : platform.Bounds.Right;
+        double edgeY = _physics.Position.Y + (_physics.Size.Height / 2);
+        if (!WallEdgeVisibility.IsUsable(platform, edgeX, edgeY, snapshot.Platforms))
+        {
+            _wallClimb.Stop();
+            _stateMachine.Send(CharacterSignal.SupportLost);
+            _logger.Write("character_lost_covered_wall", new { platform = platform.Id });
+            return;
+        }
+
+        // Turns back at the boundary rather than climbing on into a covered stretch. Reversing
+        // is only worth it if the way back is itself visible; if the edge is covered in both
+        // directions there is nothing to climb either way and it lets go instead.
+        double lookAhead = _climbDirection * ClimbSpeed * delta;
+        if (!WallEdgeVisibility.IsUsable(platform, edgeX, edgeY + lookAhead, snapshot.Platforms))
+        {
+            if (WallEdgeVisibility.IsUsable(platform, edgeX, edgeY - lookAhead, snapshot.Platforms))
+            {
+                _climbDirection = -_climbDirection;
+            }
+            else
+            {
+                _wallClimb.Stop();
+                _stateMachine.Send(CharacterSignal.SupportLost);
+                _logger.Write("character_lost_covered_wall", new { platform = platform.Id });
+                return;
+            }
+        }
 
         double roll = Random.Shared.NextDouble();
         if (roll < ClimbLetGoChancePerSecond * delta)
