@@ -17,6 +17,8 @@ internal enum TrayCommand
     IntensityCalm,
     IntensityNormal,
     IntensityActive,
+    ShowPlatformDebug,
+    HidePlatformDebug,
 }
 
 /// <summary>
@@ -68,6 +70,7 @@ internal sealed class TrayIcon : IDisposable
     private const uint IdNormal = 4;
     private const uint IdActive = 5;
     private const uint IdQuit = 6;
+    private const uint IdPlatformDebug = 8;
 
     private readonly ConcurrentQueue<TrayCommand> _commands = new();
     private readonly ManualResetEventSlim _ready = new(false);
@@ -87,12 +90,14 @@ internal sealed class TrayIcon : IDisposable
     private bool _visible;
     private bool _paused;
     private string _intensity;
+    private bool _platformDebug;
 
-    public TrayIcon(bool visible, bool paused, string intensity)
+    public TrayIcon(bool visible, bool paused, string intensity, bool platformDebug)
     {
         _visible = visible;
         _paused = paused;
         _intensity = intensity;
+        _platformDebug = platformDebug;
         _wndProc = HandleMessage;
 
         _thread = new Thread(Run)
@@ -239,6 +244,13 @@ internal sealed class TrayIcon : IDisposable
         AppendMenuW(menu, MfPopup, (nuint)intensity, "Активность");
 
         AppendMenuW(menu, MfSeparator, 0, null);
+        AppendMenuW(
+            menu,
+            MfString | (_platformDebug ? MfChecked : 0),
+            IdPlatformDebug,
+            "Developer: платформы");
+
+        AppendMenuW(menu, MfSeparator, 0, null);
         AppendMenuW(menu, MfString, IdQuit, "Завершить");
 
         GetCursorPos(out Point cursor);
@@ -275,6 +287,12 @@ internal sealed class TrayIcon : IDisposable
             case IdActive:
                 _intensity = "active";
                 _commands.Enqueue(TrayCommand.IntensityActive);
+                break;
+            case IdPlatformDebug:
+                _platformDebug = !_platformDebug;
+                _commands.Enqueue(_platformDebug
+                    ? TrayCommand.ShowPlatformDebug
+                    : TrayCommand.HidePlatformDebug);
                 break;
             case IdQuit:
                 _commands.Enqueue(TrayCommand.Quit);

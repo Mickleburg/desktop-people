@@ -29,6 +29,7 @@ public sealed partial class OverlayNode : Control
     private const uint LwaAlpha = 0x00000002;
 
     private readonly GodotCharacterRenderer _renderer = new();
+    private DebugOverlay? _debugOverlay;
     private CharacterSimulation? _simulation;
     private WindowsWindowPlatformProvider? _windowPlatforms;
     private TrayIcon? _tray;
@@ -114,8 +115,13 @@ public sealed partial class OverlayNode : Control
         RectD overlayBounds = OverlayScreenBounds();
         _simulation.Start(overlayBounds, VirtualScreenBounds());
         LoadSettings();
+        CreateDebugOverlay();
         CreateLauncher();
-        _tray = new TrayIcon(_characterVisible, _simulation.IsPaused, _simulation.BehaviorIntensity);
+        _tray = new TrayIcon(
+            _characterVisible,
+            _simulation.IsPaused,
+            _simulation.BehaviorIntensity,
+            _settings.ShowPlatformDebug);
         _logger.Write("tray_created", new { status = _tray.Status });
 
         // Kept because its absence once cost a wrong conclusion: without the OS's own idea of
@@ -128,6 +134,23 @@ public sealed partial class OverlayNode : Control
             screen = DisplayServer.ScreenGetSize().ToString(),
             usable = DisplayServer.ScreenGetUsableRect().ToString(),
         });
+    }
+
+    /// <summary>Builds the developer view and leaves it in whatever state it was last left in.
+    /// <para>
+    /// Unlike the WinForms host this is not behind <c>#if DEBUG</c>. That host was only ever run
+    /// from a debug build during development, while this one is now used as the exported
+    /// artifact — and the mid-air hang showed what it costs to have no live view of the
+    /// simulation when something goes wrong on the user's own desktop. It stays off unless the
+    /// tray item is ticked, so shipping it costs nothing until it is asked for.
+    /// </para>
+    /// </summary>
+    private void CreateDebugOverlay()
+    {
+        _debugOverlay = new DebugOverlay();
+        AddChild(_debugOverlay);
+        _debugOverlay.Attach(_simulation!, _windowPlatforms!);
+        _debugOverlay.Visible = _settings.ShowPlatformDebug;
     }
 
     /// <summary>The character is deliberately not on the desktop yet: as in the WinForms host,
@@ -272,6 +295,13 @@ public sealed partial class OverlayNode : Control
 
         UpdateClickThrough();
         QueueRedraw();
+
+        // Its own canvas item, so it needs its own invalidation; skipped entirely while hidden
+        // rather than redrawn into nothing.
+        if (_debugOverlay is { Visible: true })
+        {
+            _debugOverlay.QueueRedraw();
+        }
     }
 
     /// <summary>Applies whatever the tray menu asked for. The menu runs on its own thread, so
@@ -317,10 +347,26 @@ public sealed partial class OverlayNode : Control
             case TrayCommand.IntensityActive:
                 SetIntensity("active");
                 break;
+            case TrayCommand.ShowPlatformDebug:
+                SetPlatformDebug(true);
+                break;
+            case TrayCommand.HidePlatformDebug:
+                SetPlatformDebug(false);
+                break;
             case TrayCommand.Quit:
                 GetTree().Quit();
                 break;
         }
+    }
+
+    private void SetPlatformDebug(bool enabled)
+    {
+        if (_debugOverlay is not null)
+        {
+            _debugOverlay.Visible = enabled;
+        }
+
+        Save(_settings with { ShowPlatformDebug = enabled });
     }
 
     private void SetIntensity(string intensity)
@@ -413,16 +459,27 @@ public sealed partial class OverlayNode : Control
             Vec2 pointer = PollPointer();
             if (button.Pressed)
             {
-                _simulation.TryGrab(pointer, _elapsedSeconds);
+                bool grabbed = _simulation.TryGrab(pointer, _elapsedSeconds);
+                RecordPointerEvent(grabbed ? "grab" : "miss");
             }
             else
             {
                 _simulation.ReleaseGrab(pointer);
+                RecordPointerEvent("release");
             }
         }
         else if (@event is InputEventMouseMotion && _simulation.IsHeld)
         {
             _simulation.Drag(PollPointer(), _elapsedSeconds);
+            RecordPointerEvent("drag");
+        }
+    }
+
+    private void RecordPointerEvent(string description)
+    {
+        if (_debugOverlay is not null)
+        {
+            _debugOverlay.LastPointerEvent = description;
         }
     }
 
