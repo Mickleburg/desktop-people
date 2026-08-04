@@ -23,6 +23,7 @@ public sealed partial class OverlayNode : Control
     private const uint SwpFrameChanged = 0x0020;
     private static readonly nint HwndTopMost = new(-1);
     private const double TopMostReassertIntervalSeconds = 2.0;
+    private const double StalledFrameSeconds = 0.5;
     private const int WsExTransparent = 0x00000020;
     private const int WsExLayered = 0x00080000;
     private const uint LwaAlpha = 0x00000002;
@@ -244,6 +245,16 @@ public sealed partial class OverlayNode : Control
         if (_simulation is null || _windowPlatforms is null)
         {
             return;
+        }
+
+        // A frame this long means the whole host stopped for that time, which on screen is
+        // indistinguishable from the character freezing mid-air. Recorded because the two have
+        // completely different causes and the log is the only way to tell them apart after the
+        // fact: a stall shows up here, a simulation that stopped landing shows up as
+        // character_airborne_too_long instead.
+        if (delta > StalledFrameSeconds)
+        {
+            _logger.Write("frame_stall", new { seconds = Math.Round(delta, 2) });
         }
 
         DrainTrayCommands();

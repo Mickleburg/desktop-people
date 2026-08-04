@@ -27,6 +27,11 @@ public sealed class CharacterSimulation
     private const double ClimbPushOffVerticalImpulse = 560;
     private const string LeftScreenEdgeId = "screen:left-edge";
     private const string RightScreenEdgeId = "screen:right-edge";
+    /// <summary>Longest a fall can plausibly take: the throw speed is capped at 1600 px/s
+    /// against gravity of 1850 px/s^2, so even a straight-up throw is back down in under two
+    /// seconds. Anything past this is a failure, not a long arc.</summary>
+    private const double MaximumAirborneSeconds = 6.0;
+
     private const double FleeDuration = 4.0;
     private const double FleeJumpChancePerSecond = 0.3;
     private const double CursorEnergyReferenceSpeed = 900;
@@ -74,6 +79,7 @@ public sealed class CharacterSimulation
     private double _cursorEnergy;
     private Vec2 _lastFramePointer;
     private bool _isFleeing;
+    private double _airborneSeconds;
     private double _fleeSecondsRemaining;
     private double _characterScale = 1.0;
     private double _climbAmount;
@@ -371,6 +377,7 @@ public sealed class CharacterSimulation
                 UpdateGroundedPhysics(delta, snapshot);
             }
 
+            EnforceAirborneLimit(delta);
             RecoverFromInvalidPhysicsState();
             UpdateAutonomousBehavior();
             if (_clicked && _stateTime > 0.45)
@@ -440,6 +447,46 @@ public sealed class CharacterSimulation
             bad_position = badPosition.ToString(),
             bad_size = badSize.ToString(),
         });
+    }
+
+    /// <summary>A falling character always meets something within a second or two: gravity is
+    /// constant, the throw speed is capped, and the desktop floor catches whatever reaches it.
+    /// Staying airborne far longer means the fall logic has failed in a way not yet understood,
+    /// and what the user sees is a character hanging motionless in mid-air. Rather than leave
+    /// them watching that, put it back on the floor and record the state that led there.
+    /// <para>
+    /// The time is accumulated from simulated deltas, so a host whose frame loop stalls does not
+    /// trip this: no Update calls, no accumulation. That failure looks identical on screen but
+    /// is a different bug, and the hosts report it separately as a stalled frame.
+    /// </para>
+    /// </summary>
+    private void EnforceAirborneLimit(double delta)
+    {
+        if (_stateMachine.Current != CharacterState.Fall)
+        {
+            _airborneSeconds = 0;
+            return;
+        }
+
+        _airborneSeconds += delta;
+        if (_airborneSeconds < MaximumAirborneSeconds)
+        {
+            return;
+        }
+
+        _airborneSeconds = 0;
+        double floorY = CreateDesktopPlatform().Segments[0].SurfaceY;
+        _logger.Write("character_airborne_too_long", new
+        {
+            position = _physics.Position.ToString(),
+            velocity = _physics.Velocity.ToString(),
+            floor_y = floorY,
+        });
+
+        _physics.LandOn(floorY);
+        _currentPlatformId = "desktop:work-area";
+        _attachment.Detach();
+        _stateMachine.Send(CharacterSignal.Landed);
     }
 
     private static bool IsPositionSane(Vec2 position, RectD virtualBounds)

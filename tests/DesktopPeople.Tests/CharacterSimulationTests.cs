@@ -23,7 +23,34 @@ internal static class CharacterSimulationTests
         new("simulation recovers after the renderer reports a failure", RecoversAfterRenderFailure),
         new("grab only takes hold when the pointer is on the character", GrabRequiresHit),
         new("a flick throws the character, a tap only nudges it", ThrowCarriesDragVelocity),
+        new("a character that never lands is put back on the floor", AirborneTooLongIsRescued),
     ];
+
+    /// <summary>Reproduces the shape of a reported hang: the character hung motionless in
+    /// mid-air for seventeen seconds after being thrown. Here the floor is placed far enough
+    /// away that the fall cannot finish on its own, which is what the guard is for.</summary>
+    private static void AirborneTooLongIsRescued()
+    {
+        var screens = new DeepScreens();
+        CharacterSimulation simulation = new(NullOverlayLogger.Instance, new StubPlatforms(), screens);
+        simulation.Start(screens.VirtualBounds, screens.VirtualBounds);
+
+        // Five simulated seconds: still falling, still untouched by the guard.
+        for (int i = 0; i < 300; i++)
+        {
+            simulation.Update(Frame, new Vec2(-10_000, -10_000), visible: true);
+        }
+
+        AssertEx.Equal(CharacterState.Fall, simulation.State);
+
+        for (int i = 0; i < 120; i++)
+        {
+            simulation.Update(Frame, new Vec2(-10_000, -10_000), visible: true);
+        }
+
+        AssertEx.True(Grounded(simulation.State));
+        AssertEx.True(simulation.CurrentFrame().Body.Bottom <= DeepScreens.FloorY + 1);
+    }
 
     private static void LandsOnDesktopFloor()
     {
@@ -183,6 +210,24 @@ internal static class CharacterSimulationTests
         public const double FloorY = 1040;
 
         public RectD VirtualBounds => new(0, 0, 1920, 1080);
+
+        public int MonitorCount => 1;
+
+        public RectD WorkAreaAt(Vec2 overlayPoint) => new(0, 0, 1920, FloorY);
+
+        public double MonitorTopAt(Vec2 overlayPoint) => 0;
+
+        public RectD PrimaryWorkArea => new(0, 0, 1920, FloorY);
+    }
+
+    /// <summary>A screen whose floor is far below anything the character can reach quickly, so a
+    /// fall genuinely cannot finish within the airborne limit. Without such a screen there is no
+    /// way to hold the character in the air long enough to exercise the guard.</summary>
+    private sealed class DeepScreens : IScreenGeometry
+    {
+        public const double FloorY = 400_000;
+
+        public RectD VirtualBounds => new(0, 0, 1920, FloorY + 40);
 
         public int MonitorCount => 1;
 
