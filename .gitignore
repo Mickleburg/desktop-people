@@ -9,3 +9,7 @@ TestResults/
 tests/fixtures/private/
 *.log
 
+# Godot's import/build cache. The .uid files beside the scripts are NOT cache and belong in
+# the repository — Godot uses them to keep scene references stable when files move.
+src/DesktopPeople.Godot/.godot/
+

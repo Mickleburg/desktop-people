@@ -1,0 +1,42 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+# Godot's .NET export looks for a solution named after the assembly, next to project.godot, and
+# publishes it. The repository's own DesktopPeople.slnx stays the one humans build; this exists
+# purely so the export has something it recognises, and it carries the ExportDebug/ExportRelease
+# configurations Godot builds with — the referenced libraries map those onto plain Release.
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DesktopPeople.Godot", "DesktopPeople.Godot.csproj", "{8037DCE8-668B-4BF5-950F-A20533F4000B}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DesktopPeople.Core", "..\DesktopPeople.Core\DesktopPeople.Core.csproj", "{73872AD9-E039-4DA8-933D-42DACE77AF93}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DesktopPeople.Windows", "..\DesktopPeople.Windows\DesktopPeople.Windows.csproj", "{33F7A440-B3B9-43A3-956D-681E5DBB3F82}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		ExportDebug|Any CPU = ExportDebug|Any CPU
+		ExportRelease|Any CPU = ExportRelease|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8037DCE8-668B-4BF5-950F-A20533F4000B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8037DCE8-668B-4BF5-950F-A20533F4000B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8037DCE8-668B-4BF5-950F-A20533F4000B}.ExportDebug|Any CPU.ActiveCfg = ExportDebug|Any CPU
+		{8037DCE8-668B-4BF5-950F-A20533F4000B}.ExportDebug|Any CPU.Build.0 = ExportDebug|Any CPU
+		{8037DCE8-668B-4BF5-950F-A20533F4000B}.ExportRelease|Any CPU.ActiveCfg = ExportRelease|Any CPU
+		{8037DCE8-668B-4BF5-950F-A20533F4000B}.ExportRelease|Any CPU.Build.0 = ExportRelease|Any CPU
+		{73872AD9-E039-4DA8-933D-42DACE77AF93}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{73872AD9-E039-4DA8-933D-42DACE77AF93}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{73872AD9-E039-4DA8-933D-42DACE77AF93}.ExportDebug|Any CPU.ActiveCfg = Debug|Any CPU
+		{73872AD9-E039-4DA8-933D-42DACE77AF93}.ExportDebug|Any CPU.Build.0 = Debug|Any CPU
+		{73872AD9-E039-4DA8-933D-42DACE77AF93}.ExportRelease|Any CPU.ActiveCfg = Release|Any CPU
+		{73872AD9-E039-4DA8-933D-42DACE77AF93}.ExportRelease|Any CPU.Build.0 = Release|Any CPU
+		{33F7A440-B3B9-43A3-956D-681E5DBB3F82}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{33F7A440-B3B9-43A3-956D-681E5DBB3F82}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{33F7A440-B3B9-43A3-956D-681E5DBB3F82}.ExportDebug|Any CPU.ActiveCfg = Debug|Any CPU
+		{33F7A440-B3B9-43A3-956D-681E5DBB3F82}.ExportDebug|Any CPU.Build.0 = Debug|Any CPU
+		{33F7A440-B3B9-43A3-956D-681E5DBB3F82}.ExportRelease|Any CPU.ActiveCfg = Release|Any CPU
+		{33F7A440-B3B9-43A3-956D-681E5DBB3F82}.ExportRelease|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
