@@ -6,6 +6,8 @@ TestCase[] tests =
     .. PlatformCoreTests.All,
     .. WindowAdapterTests.All,
     .. CharacterSimulationTests.All,
+    .. CharacterRigTests.All,
+    .. PhotoIntakeTests.All,
 ];
 
 int failures = 0;

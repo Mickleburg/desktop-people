@@ -24,6 +24,8 @@ public sealed partial class OverlayNode : Control
     private static readonly nint HwndTopMost = new(-1);
     private const double TopMostReassertIntervalSeconds = 2.0;
     private const double StalledFrameSeconds = 0.5;
+    private const double HeartbeatIntervalSeconds = 10.0;
+    private const double FrameFailureReportIntervalSeconds = 5.0;
     private const int WsExTransparent = 0x00000020;
     private const int WsExLayered = 0x00080000;
     private const uint LwaAlpha = 0x00000002;
@@ -43,6 +45,11 @@ public sealed partial class OverlayNode : Control
     private nint _handle;
     private double _topMostReassertSeconds;
     private double _elapsedSeconds;
+    private double _heartbeatSeconds;
+    private int _framesSinceHeartbeat;
+    private double _frameFailureSilenceSeconds;
+    private int _frameFailureCount;
+    private string _lastFrameFailure = string.Empty;
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern nint GetWindowLongPtr(nint window, int index);
@@ -129,6 +136,11 @@ public sealed partial class OverlayNode : Control
         GetWindowRect(_handle, out Rect rect);
         _logger.Write("host_started", new
         {
+            // How long the exported build took to get this far. Reported slow starts are
+            // otherwise unmeasurable: the first log line used to be written at this point, so
+            // everything before it was invisible.
+            startup_seconds = Math.Round(
+                (DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime).TotalSeconds, 2),
             godot_size = window.Size.ToString(),
             os_rect = $"{rect.Left},{rect.Top}..{rect.Right},{rect.Bottom}",
             screen = DisplayServer.ScreenGetSize().ToString(),
@@ -270,16 +282,86 @@ public sealed partial class OverlayNode : Control
             return;
         }
 
+        // Deliberately outside the guard below, so it still reports when the frame's work is
+        // failing: a heartbeat that keeps coming while nothing else changes says the loop is
+        // alive and the simulation is not, which is the distinction a hang has to be judged on.
+        Heartbeat(delta);
+
         // A frame this long means the whole host stopped for that time, which on screen is
-        // indistinguishable from the character freezing mid-air. Recorded because the two have
-        // completely different causes and the log is the only way to tell them apart after the
-        // fact: a stall shows up here, a simulation that stopped landing shows up as
-        // character_airborne_too_long instead.
+        // indistinguishable from the character freezing mid-air.
         if (delta > StalledFrameSeconds)
         {
             _logger.Write("frame_stall", new { seconds = Math.Round(delta, 2) });
         }
 
+        try
+        {
+            Tick(delta);
+        }
+        catch (Exception exception)
+        {
+            // Godot swallows an exception thrown out of _Process: it prints it to a console an
+            // exported build does not have and calls this method again next frame. The
+            // simulation then never advances while the engine keeps presenting the last good
+            // frame — on screen that is a character hanging motionless in mid-air, with not one
+            // line in the log to say so. Catching here both records it and lets the next frame
+            // try again, so a transient failure stops being permanent.
+            ReportFailure("host_frame_failed", exception);
+        }
+    }
+
+    /// <summary>Periodic proof of life, with the numbers needed to judge a report of the
+    /// character "hanging" or "lagging" — neither of which the log could answer before, because
+    /// it only ever recorded state changes and a hung character makes none.</summary>
+    private void Heartbeat(double delta)
+    {
+        _framesSinceHeartbeat++;
+        _heartbeatSeconds += delta;
+        _frameFailureSilenceSeconds += delta;
+        if (_heartbeatSeconds < HeartbeatIntervalSeconds)
+        {
+            return;
+        }
+
+        _logger.Write("host_heartbeat", new
+        {
+            fps = Math.Round(_framesSinceHeartbeat / _heartbeatSeconds, 1),
+            state = _simulation!.State.ToString(),
+            visible = _characterVisible,
+            paused = _simulation.IsPaused,
+            platforms = _windowPlatforms!.Snapshot.Platforms.Length,
+        });
+
+        _heartbeatSeconds = 0;
+        _framesSinceHeartbeat = 0;
+    }
+
+    /// <summary>Reports a failing frame without letting a fault that repeats sixty times a
+    /// second bury the rest of the log. The first one, and any change of cause, goes in at once.</summary>
+    private void ReportFailure(string eventName, Exception exception)
+    {
+        string description = exception.ToString();
+        _frameFailureCount++;
+
+        if (description == _lastFrameFailure &&
+            _frameFailureSilenceSeconds < FrameFailureReportIntervalSeconds)
+        {
+            return;
+        }
+
+        _logger.Write(eventName, new
+        {
+            occurrences = _frameFailureCount,
+            error = description,
+        });
+
+        _lastFrameFailure = description;
+        _frameFailureSilenceSeconds = 0;
+        _frameFailureCount = 0;
+    }
+
+    private void Tick(double delta)
+    {
         DrainTrayCommands();
         TrackLauncherWindow();
 
@@ -288,10 +370,24 @@ public sealed partial class OverlayNode : Control
 
         // The provider needs this window's screen-space rectangle to map real windows into
         // overlay coordinates, so pumping it stays a host responsibility.
-        _windowPlatforms.Pump(DateTimeOffset.UtcNow, OverlayScreenBounds(), VirtualScreenBounds());
+        //
+        // Isolated on purpose. Enumerating the desktop's windows is a best-effort input, not
+        // something the character's physics depends on being fresh — so a fault in it should
+        // cost a stale window list for one frame, not a character frozen in mid-air. That
+        // distinction matters here: the one hang whose cause is still unknown began on the very
+        // frame a platform disappeared.
+        try
+        {
+            _windowPlatforms!.Pump(
+                DateTimeOffset.UtcNow, OverlayScreenBounds(), VirtualScreenBounds());
+        }
+        catch (Exception exception)
+        {
+            ReportFailure("window_pump_failed", exception);
+        }
 
         Vec2 pointer = PollPointer();
-        _simulation.Update(delta, pointer, visible: _characterVisible);
+        _simulation!.Update(delta, pointer, visible: _characterVisible);
 
         UpdateClickThrough();
         QueueRedraw();

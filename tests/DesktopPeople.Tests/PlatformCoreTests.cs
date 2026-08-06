@@ -24,6 +24,7 @@ internal static class PlatformCoreTests
         new("upward character does not land", CollisionIgnoresUpwardMotion),
         new("swept collision prevents tunnelling", SweptCollision),
         new("nearest crossed platform wins", NearestPlatformWins),
+        new("a fall starting below a surface can never land on it", FallStartingBelowMissesTheSurface),
         new("landing without monitor headroom is rejected", CollisionRejectsSegmentWithoutHeadroom),
         new("attachment stores the relative foot position", AttachmentStoresRelativePosition),
         new("support without monitor headroom is rejected", AttachmentRejectsSegmentWithoutHeadroom),
@@ -147,6 +148,39 @@ internal static class PlatformCoreTests
             1_500,
             [Platform("thin", 0, 120, 300)]);
         AssertEx.Equal("thin", collision!.Value.Platform.Id);
+    }
+
+    /// <summary>The rule behind the "peeks out and falls" defect. Landing is a swept test: a
+    /// surface only catches feet that CROSS it. Feet that are already past it are past it for
+    /// good — so anything that quietly moves the body down before a fall begins (entering a
+    /// hiding place used to, by 14% of the character's height) makes the surface it was standing
+    /// on unable to ever catch it again.
+    /// <para>
+    /// Also pins down why it only showed up on a window stacked on another window: with nothing
+    /// below but the desktop, the same miss just lands on the floor a few pixels lower and looks
+    /// like nothing happened.
+    /// </para>
+    /// </summary>
+    private static void FallStartingBelowMissesTheSurface()
+    {
+        var resolver = new PlatformCollisionResolver();
+        DesktopPlatform surface = Platform("window:under", 0, 150, 300);
+
+        // Starting exactly on the surface: the next downward step crosses it and lands.
+        AssertEx.Equal(
+            "window:under",
+            resolver.ResolveDownward(
+                new RectD(100, 100, 40, 50),
+                new RectD(100, 108, 40, 50),
+                400,
+                [surface])!.Value.Platform.Id);
+
+        // Starting a fraction below it: no crossing exists any more, at any speed.
+        AssertEx.True(resolver.ResolveDownward(
+            new RectD(100, 107, 40, 50),
+            new RectD(100, 115, 40, 50),
+            400,
+            [surface]) is null);
     }
 
     private static void NearestPlatformWins()

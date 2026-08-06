@@ -15,6 +15,17 @@ internal readonly record struct CharacterPose(
     int HidePeekDirection = 1,
     double HideAmount = 1);
 
+/// <summary>
+/// FROZEN (2026-08-05, by the user's decision). The Godot host is the one that ships; this
+/// renderer is kept only as a fallback until the Godot host has been confirmed on a
+/// multi-monitor setup, which is the last thing about it nobody has checked.
+/// <para>
+/// Do not fix anything here. Its pose maths is a copy of what now lives in
+/// <see cref="CharacterRig"/>, and keeping two copies in step is what made a single fix to the
+/// climbing arms have to be written twice. Anything visual belongs in the Godot renderer, which
+/// consumes the rig instead of repeating it.
+/// </para>
+/// </summary>
 internal sealed class CharacterRenderer
 {
     /// <summary>How far the climbing pose must have blended in before the character counts as

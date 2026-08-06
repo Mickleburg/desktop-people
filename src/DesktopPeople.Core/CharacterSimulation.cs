@@ -751,7 +751,7 @@ public sealed class CharacterSimulation
                 return;
             }
 
-            _stateMachine.Send(CharacterSignal.SupportLost);
+            StopHiding();
             return;
         }
 
@@ -769,8 +769,32 @@ public sealed class CharacterSimulation
         }
         else
         {
-            _stateMachine.Send(CharacterSignal.SupportLost);
+            StopHiding();
         }
+    }
+
+    /// <summary>Leaves a hiding place, putting the body back at the height it was standing at
+    /// before it tucked down beside the wall.
+    /// <para>
+    /// Entering a hiding place drops the body by <see cref="HideLowerOffset"/> of its height, so
+    /// the peek reads at the naturally crouched height of someone leaning around a corner.
+    /// Leaving without undoing that starts the fall ALREADY BELOW the surface the character was
+    /// standing on — and <c>ResolveDownward</c> only catches a sweep that crosses a surface
+    /// (<c>SurfaceY &lt; previousBounds.Bottom</c> is skipped), so that surface can never catch
+    /// it again and the character drops to whatever lies further down.
+    /// </para>
+    /// <para>
+    /// This is invisible when hiding beside a window standing on the desktop — the character
+    /// lands back on the floor twenty pixels lower and nobody can tell. It is obvious when the
+    /// wall is a window stacked on top of another window, which is how it was reported: the
+    /// character peeks out and drops straight past the window it had been standing on.
+    /// </para>
+    /// </summary>
+    private void StopHiding()
+    {
+        _physics.SetPosition(new Vec2(_physics.Position.X, _hideEntryPosition.Y));
+        _hidingPlatformId = null;
+        _stateMachine.Send(CharacterSignal.SupportLost);
     }
 
     private void UpdateClimb(double delta, PlatformSnapshot snapshot)
@@ -941,8 +965,7 @@ public sealed class CharacterSimulation
                 // of assuming Idle is safe: if the wall is still right there it re-lands
                 // within a frame or two (imperceptible), and if it isn't, the character
                 // properly falls instead of floating in place.
-                _hidingPlatformId = null;
-                _stateMachine.Send(CharacterSignal.SupportLost);
+                StopHiding();
                 _logger.Write("character_stopped_hiding");
                 break;
         }
